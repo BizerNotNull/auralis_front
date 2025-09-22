@@ -28,7 +28,7 @@ export default function Home() {
             <Link href="#features" className="hover:text-slate-900">
               功能亮点
             </Link>
-            <Link href="#agents" className="hover:text-slate-900">
+            <Link href="/smart" className="hover:text-slate-900">
               智能体
             </Link>
             <Link href="#docs" className="hover:text-slate-900">

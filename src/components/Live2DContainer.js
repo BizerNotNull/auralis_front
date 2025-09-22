@@ -163,6 +163,13 @@ export default function Live2DContainer({
   const [status, setStatus] = useState("init");
   const [error, setError] = useState(null);
 
+  const hostClasses = [
+    "relative overflow-hidden rounded-2xl shadow-lg ring-1 ring-black/5 select-none",
+    className,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   useEffect(() => {
     let cancelled = false;
     let dispose = null;
@@ -207,7 +214,7 @@ export default function Live2DContainer({
         canvas.style.width = "100%";
         canvas.style.height = "100%";
         canvas.style.display = "block";
-        canvas.style.borderRadius = "1rem";
+        canvas.style.borderRadius = "inherit";
 
         const app = new PIXI.Application({
           view: canvas,
@@ -244,9 +251,13 @@ export default function Live2DContainer({
 
           modelRef.current = model;
 
-          const scale = Math.min(width / (model.width * 0.8), height / (model.height * 0.8));
+          const paddingRatio = 0.06;
+          const targetWidth = width * (1 - paddingRatio);
+          const targetHeight = height * (1 - paddingRatio);
+          const scale = Math.min(targetWidth / model.width, targetHeight / model.height);
           model.scale.set(scale);
-          model.position.set(width / 2, height * 0.95);
+          const verticalOffset = height * 0.1;
+          model.position.set(width / 2, height + verticalOffset);
           model.anchor.set(0.5, 1.0);
 
           model.interactive = true;
@@ -422,18 +433,18 @@ export default function Live2DContainer({
         dispose = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelUrl, width, height, background, eyeStrength, coreScriptUrl]);
 
   return (
-    <div className="w-full h-full p-2">
+    <div className="flex w-full flex-col items-center gap-3">
       <div
         ref={hostRef}
-        className={
-          "relative w-full h-full rounded-2xl shadow-lg ring-1 ring-black/5 overflow-hidden select-none " +
-          className
-        }
-        style={{ width, height, background: background === "transparent" ? "transparent" : background }}
+        className={hostClasses}
+        style={{
+          width,
+          height,
+          background: background === "transparent" ? "transparent" : background,
+        }}
       >
         <canvas ref={canvasRef} className="block h-full w-full" />
         {status !== "ready" && (
@@ -444,7 +455,7 @@ export default function Live2DContainer({
           </div>
         )}
       </div>
-      <div className="mt-2 text-xs text-gray-500">
+      <div className="text-center text-xs text-gray-500">
         将鼠标移动到区域内可以驱动眼睛和头部，按住模型可拖拽调整位置。
       </div>
     </div>
