@@ -286,13 +286,21 @@ export default function ChatPanel({ agentId, agent }) {
           setConversationId(String(data.conversation_id));
         }
 
-        setMessages((prev) =>
-          prev.filter((item) => item.id !== optimisticMessage.id),
-        );
+        setMessages((prev) => {
+          const withoutOptimistic = prev.filter(
+            (item) => item.id !== optimisticMessage.id,
+          );
+          const next = [...withoutOptimistic];
+          if (data?.user_message) {
+            next.push(data.user_message);
+          }
+          if (data?.assistant_message) {
+            next.push(data.assistant_message);
+          }
+          return next;
+        });
 
-        if (data?.assistant_message) {
-          setMessages((prev) => [...prev, data.assistant_message]);
-        } else {
+        if (!data?.assistant_message) {
           await loadMessages();
         }
 
@@ -489,3 +497,4 @@ export default function ChatPanel({ agentId, agent }) {
     </section>
   );
 }
+
