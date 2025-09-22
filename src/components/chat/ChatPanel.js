@@ -352,7 +352,7 @@ export default function ChatPanel({ agentId, agent }) {
     orderedMessages.length === 0;
 
   return (
-    <section className="flex h-full w-full flex-col overflow-hidden rounded-3xl border border-white/30 bg-white/70 shadow-xl backdrop-blur">
+    <section className="flex h-full w-full max-h-[85vh] sm:min-h-[480px] lg:max-h-[720px] flex-col overflow-hidden rounded-3xl border border-white/30 bg-white/70 shadow-xl backdrop-blur">
       <header className="flex items-start justify-between gap-3 border-b border-white/40 bg-white/80 p-4">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">
@@ -369,8 +369,8 @@ export default function ChatPanel({ agentId, agent }) {
         </div>
       </header>
 
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto px-4 py-3">
+      <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
           {profileStatus.error && (
             <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
               {profileStatus.error}
@@ -497,4 +497,6 @@ export default function ChatPanel({ agentId, agent }) {
     </section>
   );
 }
+
+
 
