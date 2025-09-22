@@ -105,7 +105,7 @@ export default function SmartPage() {
             </div>
           </div>
 
-          <div className="flex flex-1 min-h-[480px]">
+          <div className="flex flex-1 min-h-0">
             <ChatPanel agentId={agentId || undefined} agent={agent} />
           </div>
         </div>
@@ -113,3 +113,4 @@ export default function SmartPage() {
     </div>
   );
 }
+
