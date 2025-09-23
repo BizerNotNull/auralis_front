@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import Link from "next/link";
@@ -175,15 +176,25 @@ export default function AgentDirectoryPage() {
                 console.warn("Failed to parse agent tags", error);
               }
 
+              const avatarUrl = agent?.avatar_url ?? agent?.avatarUrl ?? "";
+
               return (
                 <article
                   key={agentId ?? Math.random()}
                   className="flex flex-col rounded-3xl border border-white/60 bg-white/90 p-5 shadow-xl backdrop-blur"
                 >
-                  <div className="relative mb-4 aspect-[4/3] w-full overflow-hidden rounded-2xl bg-slate-100">
-                    <div className="flex h-full items-center justify-center text-xs uppercase tracking-wide text-slate-400">
-                      头像预留位
-                    </div>
+                  <div className="relative mb-4 aspect-[4/3] w-full overflow-hidden rounded-2xl border border-slate-100 bg-slate-50">
+                    {avatarUrl ? (
+                      <img
+                        src={avatarUrl}
+                        alt={`${agent?.name ?? `Agent ${agentId ?? ""}`} avatar`}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-xs uppercase tracking-wide text-slate-400">
+                        头像预留位
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-1 flex-col">

@@ -17,5 +17,5 @@ export function middleware(request) {
 }
 
 export const config = {
-  matcher: ["/smart/:path*"],
+  matcher: ["/smart/:path*", "/admin/:path*"],
 };
