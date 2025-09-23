@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -66,6 +67,21 @@ export default function ChatPanel({ agentId, agent }) {
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
+  const [clearStatus, setClearStatus] = useState({
+    loading: false,
+    error: null,
+    success: false,
+  });
+
+  const agentAvatar = agent?.avatar_url ?? agent?.avatarUrl ?? "";
+  const agentAltText = `${agent?.name ?? "Agent"} avatar`;
+  const agentInitial = (() => {
+    const source = typeof agent?.name === "string" ? agent.name.trim() : "";
+    if (!source) {
+      return "A";
+    }
+    return source.charAt(0).toUpperCase();
+  })();
 
   const speechErrorHandler = useCallback((event) => {
     console.warn("Speech recognition error", event?.error);
@@ -219,6 +235,58 @@ export default function ChatPanel({ agentId, agent }) {
     }
   }, [agentId, userId]);
 
+  const handleClearConversation = useCallback(async () => {
+    if (!agentId || !userId) {
+      setClearStatus({
+        loading: false,
+        error: "Missing agent or user information. Please refresh.",
+        success: false,
+      });
+      return;
+    }
+
+    const numericUserId = Number(userId);
+    if (Number.isNaN(numericUserId)) {
+      setClearStatus({
+        loading: false,
+        error: "Unable to determine user identity. Please refresh.",
+        success: false,
+      });
+      return;
+    }
+
+    setClearStatus({ loading: true, error: null, success: false });
+    try {
+      const response = await fetch(`${API_BASE_URL}/agents/${agentId}/conversations`, {
+        method: "DELETE",
+        headers: deriveHeaders({ "Content-Type": "application/json" }),
+        credentials: "include",
+        body: JSON.stringify({ user_id: numericUserId }),
+      });
+
+      if (!response.ok && response.status !== 204) {
+        throw new Error(`Clear conversation failed with ${response.status}`);
+      }
+
+      setMessages([]);
+      setConversationId(null);
+      setInputValue("");
+      setSendError(null);
+
+      await initializeConversation();
+      await loadMessages();
+
+      setClearStatus({ loading: false, error: null, success: true });
+    } catch (error) {
+      console.error(error);
+      setClearStatus({
+        loading: false,
+        error: error?.message ?? "Failed to clear conversation",
+        success: false,
+      });
+    }
+  }, [agentId, userId, initializeConversation, loadMessages]);
+
   useEffect(() => {
     (async () => {
       await loadProfile();
@@ -228,6 +296,7 @@ export default function ChatPanel({ agentId, agent }) {
   useEffect(() => {
     setMessages([]);
     setConversationId(null);
+    setClearStatus({ loading: false, error: null, success: false });
   }, [agentId]);
 
   useEffect(() => {
@@ -354,18 +423,32 @@ export default function ChatPanel({ agentId, agent }) {
   return (
     <section className="flex h-full w-full max-h-[85vh] sm:min-h-[480px] lg:max-h-[720px] flex-col overflow-hidden rounded-3xl border border-white/30 bg-white/70 shadow-xl backdrop-blur">
       <header className="flex items-start justify-between gap-3 border-b border-white/40 bg-white/80 p-4">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900">
-            Smart Chat {agent?.name ? `· ${agent.name}` : ""}
-          </h2>
-          <p className="text-xs text-gray-500">
-            Browse historical messages and craft new prompts with text or voice.
-          </p>
+        <div className="flex items-center gap-3">
+          {agentAvatar ? (
+            <img
+              src={agentAvatar}
+              alt={agentAltText}
+              className="h-14 w-14 rounded-full object-cover shadow"
+            />
+          ) : (
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gray-200 text-base font-semibold text-gray-600">
+              {agentInitial}
+            </div>
+          )}
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">
+              Smart Chat {agent?.name ? `- ${agent.name}` : ""}
+            </h2>
+            <p className="text-xs text-gray-500">
+              Browse historical messages and craft new prompts with text or voice.
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-2 text-xs text-gray-500">
           {messagesStatus.loading && <span>Syncing...</span>}
-          {conversationStatus.loading && <span>Preparing...</span>}
-          {profileStatus.loading && <span>Verifying...</span>}
+          {messagesStatus.error && !messagesStatus.loading ? (
+            <span className="text-red-500">{messagesStatus.error}</span>
+          ) : null}
         </div>
       </header>
 
@@ -395,6 +478,18 @@ export default function ChatPanel({ agentId, agent }) {
             </div>
           )}
 
+          {clearStatus.error && (
+            <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+              {clearStatus.error}
+            </div>
+          )}
+
+          {clearStatus.success && (
+            <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-600">
+              Chat history cleared. A fresh conversation has started.
+            </div>
+          )}
+
           {emptyState ? (
             <div className="flex h-full items-center justify-center text-sm text-gray-500">
               No messages yet. Start the conversation whenever you are ready.
@@ -405,31 +500,53 @@ export default function ChatPanel({ agentId, agent }) {
                 const role = message?.role ?? "assistant";
                 const isUser = role.toLowerCase() === "user";
                 const bubbleClasses = isUser
-                  ? "ml-auto bg-blue-500 text-white"
-                  : "mr-auto bg-gray-100 text-gray-900";
+                  ? "bg-blue-500 text-white"
+                  : "bg-gray-100 text-gray-900";
                 return (
                   <li
                     key={
                       message?.id ??
                       `${message.role}-${message.created_at}-${Math.random()}`
                     }
-                    className="flex flex-col"
+                    className={`flex items-start gap-3 ${isUser ? "justify-end" : ""}`}
                   >
-                    <div
-                      className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses}`}
-                    >
-                      {message?.content ?? ""}
-                    </div>
-                    <span className="mt-1 text-xs text-gray-400">
-                      {isUser ? "You" : role}
-                      {formatTimestamp(
-                        message?.created_at ?? message?.createdAt,
+                    {!isUser ? (
+                      agentAvatar ? (
+                        <img
+                          src={agentAvatar}
+                          alt={agentAltText}
+                          className="mt-1 h-8 w-8 rounded-full object-cover shadow"
+                        />
+                      ) : (
+                        <div className="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-gray-200 text-xs font-medium text-gray-600">
+                          {agentInitial}
+                        </div>
                       )
-                        ? ` - ${formatTimestamp(message?.created_at ?? message?.createdAt)}`
-                        : ""}
-                      {message?.optimistic ? " - Sending" : ""}
-                      {message?.err_msg ? ` · ${message.err_msg}` : ""}
-                    </span>
+                    ) : null}
+                    <div
+                      className={`flex max-w-[80%] flex-col ${isUser ? "items-end" : "items-start"}`}
+                    >
+                      <div
+                        className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses}`}
+                      >
+                        {message?.content ?? ""}
+                      </div>
+                      <span className={`mt-1 text-xs ${isUser ? "text-right" : "text-left"} text-gray-400`}>
+                        {isUser ? "You" : role}
+                        {formatTimestamp(
+                          message?.created_at ?? message?.createdAt,
+                        )
+                          ? ` - ${formatTimestamp(message?.created_at ?? message?.createdAt)}`
+                          : ""}
+                        {message?.optimistic ? " - Sending" : ""}
+                        {message?.err_msg ? ` | ${message.err_msg}` : ""}
+                      </span>
+                    </div>
+                    {isUser ? (
+                      <div className="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-blue-500 text-xs font-medium text-white shadow">
+                        You
+                      </div>
+                    ) : null}
                   </li>
                 );
               })}
@@ -474,6 +591,14 @@ export default function ChatPanel({ agentId, agent }) {
                 />
               </button>
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleClearConversation}
+                  disabled={clearStatus.loading || !userId}
+                  className="rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-red-400 hover:text-red-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+                >
+                  {clearStatus.loading ? "Clearing..." : "Clear chat"}
+                </button>
                 <button
                   type="button"
                   onClick={loadMessages}

@@ -1,16 +1,19 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
-function deriveHeaders(extra) {
+function deriveHeaders(extra, options = {}) {
   const headers = new Headers(extra);
   headers.set("Accept", "application/json");
-  headers.set("Content-Type", "application/json");
+  if (options.contentType) {
+    headers.set("Content-Type", options.contentType);
+  }
   return headers;
 }
 
@@ -30,9 +33,35 @@ export default function CreateAgentPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(null);
 
+  const [avatarFile, setAvatarFile] = useState(null);
+
+  const avatarPreviewUrl = useMemo(() => {
+    if (!avatarFile) {
+      return "";
+    }
+    return URL.createObjectURL(avatarFile);
+  }, [avatarFile]);
+
+  useEffect(() => {
+    return () => {
+      if (avatarPreviewUrl) {
+        URL.revokeObjectURL(avatarPreviewUrl);
+      }
+    };
+  }, [avatarPreviewUrl]);
+
   const handleChange = (event) => {
     const { name, value } = event.target;
     setValues((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleAvatarChange = (event) => {
+    const file = event.target?.files?.[0];
+    if (file) {
+      setAvatarFile(file);
+    } else {
+      setAvatarFile(null);
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -42,29 +71,42 @@ export default function CreateAgentPage() {
     setSubmitting(true);
 
     try {
-      const payload = {
-        name: values.name.trim(),
-        persona_desc: values.persona_desc.trim() || undefined,
-        opening_line: values.opening_line.trim() || undefined,
-        first_turn_hint: values.first_turn_hint.trim() || undefined,
-        model_provider: values.model_provider.trim() || "openai",
-        model_name: values.model_name.trim() || "gpt-oss-120b",
-      };
+      const formData = new FormData();
+      formData.append("name", values.name.trim());
+
+      if (values.persona_desc.trim()) {
+        formData.append("persona_desc", values.persona_desc.trim());
+      }
+      if (values.opening_line.trim()) {
+        formData.append("opening_line", values.opening_line.trim());
+      }
+      if (values.first_turn_hint.trim()) {
+        formData.append("first_turn_hint", values.first_turn_hint.trim());
+      }
+
+      const provider = values.model_provider.trim() || "openai";
+      const modelName = values.model_name.trim() || "gpt-oss-120b";
+      formData.append("model_provider", provider);
+      formData.append("model_name", modelName);
 
       const temperature = Number(values.temperature);
       const maxTokens = Number(values.max_tokens);
       if (!Number.isNaN(temperature)) {
-        payload.temperature = temperature;
+        formData.append("temperature", String(temperature));
       }
       if (!Number.isNaN(maxTokens) && maxTokens > 0) {
-        payload.max_tokens = maxTokens;
+        formData.append("max_tokens", String(maxTokens));
+      }
+
+      if (avatarFile) {
+        formData.append("avatar", avatarFile);
       }
 
       const response = await fetch(`${API_BASE_URL}/agents`, {
         method: "POST",
         headers: deriveHeaders(),
         credentials: "include",
-        body: JSON.stringify(payload),
+        body: formData,
       });
 
       if (!response.ok) {
@@ -77,6 +119,7 @@ export default function CreateAgentPage() {
         id: data?.agent?.id,
         name: data?.agent?.name,
       });
+      setAvatarFile(null);
       setValues((prev) => ({
         ...prev,
         name: "",
@@ -113,6 +156,36 @@ export default function CreateAgentPage() {
         </div>
 
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
+          <label className="flex flex-col gap-2">
+            <span className="text-sm font-medium text-slate-600">头像</span>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleAvatarChange}
+              className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            />
+            {avatarPreviewUrl ? (
+              <img
+                src={avatarPreviewUrl}
+                alt="新头像预览"
+                className="mt-2 h-24 w-24 rounded-full object-cover shadow"
+              />
+            ) : (
+              <p className="mt-1 text-xs text-slate-400">
+                支持 JPG、PNG、GIF、WebP，建议尺寸不超过 5 MB。
+              </p>
+            )}
+            {avatarFile ? (
+              <button
+                type="button"
+                onClick={() => setAvatarFile(null)}
+                className="mt-2 w-fit rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-500 transition hover:border-red-300 hover:text-red-500"
+              >
+                移除已选择的头像
+              </button>
+            ) : null}
+          </label>
+
           <div className="grid gap-4 md:grid-cols-2">
             <label className="flex flex-col gap-2">
               <span className="text-sm font-medium text-slate-600">
@@ -265,3 +338,5 @@ export default function CreateAgentPage() {
     </div>
   );
 }
+
+

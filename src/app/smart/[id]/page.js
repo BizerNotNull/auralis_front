@@ -73,6 +73,7 @@ export default function SmartPage() {
     return "自定义智能体正在等待与您建立连接。";
   }, [agent?.persona_desc, agent?.first_turn_hint]);
 
+
   const live2DModel = agent?.live2d_model_id
     ? agent.live2d_model_id
     : YUMI_MODEL_URL;
@@ -103,6 +104,7 @@ export default function SmartPage() {
                 background="transparent"
               />
             </div>
+
           </div>
 
           <div className="flex flex-1 min-h-0">
