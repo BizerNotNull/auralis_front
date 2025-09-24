@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Live2DContainer from "@/components/Live2DContainer";
 import ChatPanel from "@/components/chat/ChatPanel";
+import { resolveAssetUrl } from "@/lib/media";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
@@ -85,9 +86,21 @@ export default function SmartPage() {
   }, [agent?.persona_desc, agent?.first_turn_hint]);
 
 
-  const live2DModel = agent?.live2d_model_id
+  const live2DModelRaw = agent?.live2d_model_id
     ? agent.live2d_model_id
     : YUMI_MODEL_URL;
+
+  const live2DModel = useMemo(() => {
+    if (!live2DModelRaw) {
+      return "";
+    }
+    return resolveAssetUrl(live2DModelRaw);
+  }, [live2DModelRaw]);
+
+  useEffect(() => {
+    setLive2DStatus("init");
+    setLive2DError(null);
+  }, [live2DModel]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 py-10">
@@ -108,6 +121,7 @@ export default function SmartPage() {
           <div className="flex justify-center lg:w-[460px]">
             <div className="flex w-full max-w-[420px] flex-col items-center rounded-3xl border border-white/40 bg-white/70 p-4 shadow-xl backdrop-blur">
               <Live2DContainer
+                key={live2DModel || "live2d-agent"}
                 ref={live2DRef}
                 modelUrl={live2DModel}
                 width={400}

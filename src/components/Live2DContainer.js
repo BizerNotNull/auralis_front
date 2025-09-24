@@ -1,4 +1,11 @@
-import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import React, {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 
 /**
  * Live2DContainer
@@ -18,70 +25,128 @@ import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef,
  * - The component loads live2dcubismcore.min.js (local first, then CDN fallback).
  */
 const DEFAULT_CORE_SCRIPT_URL = "/live2d/live2dcubismcore.min.js";
-const CUBISM_CORE_CDN_URL = "https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js";
+const CUBISM_CORE_CDN_URL =
+  "https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js";
 
 let cubismCorePromise;
 
 const MOTION_PRESETS = {
-  happy_jump: { duration: 1600, params: { ParamBodyAngleX: 10, ParamBodyAngleY: 6, ParamAngleZ: 12 } },
-  happy_smile: { duration: 1200, params: { ParamBodyAngleX: 4, ParamBodyAngleY: 3, ParamAngleZ: 6 } },
-  sad_drop: { duration: 1800, params: { ParamBodyAngleX: -8, ParamBodyAngleY: -6, ParamAngleZ: -6 } },
-  sad_idle: { duration: 1400, params: { ParamBodyAngleX: -3, ParamBodyAngleY: -2 } },
-  angry_point: { duration: 1500, params: { ParamBodyAngleX: 6, ParamBodyAngleY: -4, ParamAngleZ: 8 } },
-  angry_idle: { duration: 1200, params: { ParamBodyAngleX: 3, ParamBodyAngleY: -2 } },
-  surprised_react: { duration: 1600, params: { ParamBodyAngleX: 5, ParamBodyAngleY: 8, ParamAngleZ: -6 } },
-  pose_proud: { duration: 2000, params: { ParamBodyAngleX: 6, ParamBodyAngleY: 4, ParamAngleZ: -4 } },
-  gentle_wave: { duration: 2000, params: { ParamBodyAngleX: 4, ParamBodyAngleY: 2 } },
-  idle_emphatic: { duration: 1400, params: { ParamBodyAngleX: 3, ParamBodyAngleY: 2 } },
-  idle_breathe: { duration: 1600, params: { ParamBodyAngleX: 1.5, ParamBodyAngleY: 1.5 } },
+  happy_jump: {
+    duration: 1600,
+    params: { ParamBodyAngleX: 10, ParamBodyAngleY: 6, ParamAngleZ: 12 },
+  },
+  happy_smile: {
+    duration: 1200,
+    params: { ParamBodyAngleX: 4, ParamBodyAngleY: 3, ParamAngleZ: 6 },
+  },
+  sad_drop: {
+    duration: 1800,
+    params: { ParamBodyAngleX: -8, ParamBodyAngleY: -6, ParamAngleZ: -6 },
+  },
+  sad_idle: {
+    duration: 1400,
+    params: { ParamBodyAngleX: -3, ParamBodyAngleY: -2 },
+  },
+  angry_point: {
+    duration: 1500,
+    params: { ParamBodyAngleX: 6, ParamBodyAngleY: -4, ParamAngleZ: 8 },
+  },
+  angry_idle: {
+    duration: 1200,
+    params: { ParamBodyAngleX: 3, ParamBodyAngleY: -2 },
+  },
+  surprised_react: {
+    duration: 1600,
+    params: { ParamBodyAngleX: 5, ParamBodyAngleY: 8, ParamAngleZ: -6 },
+  },
+  pose_proud: {
+    duration: 2000,
+    params: { ParamBodyAngleX: 6, ParamBodyAngleY: 4, ParamAngleZ: -4 },
+  },
+  gentle_wave: {
+    duration: 2000,
+    params: { ParamBodyAngleX: 4, ParamBodyAngleY: 2 },
+  },
+  idle_emphatic: {
+    duration: 1400,
+    params: { ParamBodyAngleX: 3, ParamBodyAngleY: 2 },
+  },
+  idle_breathe: {
+    duration: 1600,
+    params: { ParamBodyAngleX: 1.5, ParamBodyAngleY: 1.5 },
+  },
 };
 
 const EMOTION_PRESETS = {
-  neutral: {},
+  neutral: {
+    ParamEyeSmileL: 0,
+    ParamEyeSmileR: 0,
+    ParamMouthForm: 0,
+    ParamMouthOpenY: 0,
+  },
   happy: {
-    ParamEyeSmileL: 0.6,
-    ParamEyeSmileR: 0.6,
-    ParamMouthForm: 0.5,
-    ParamCheekpuff: 0.35,
+    ParamEyeSmileL: 0.95,
+    ParamEyeSmileR: 0.95,
+    ParamMouthForm: 0.75,
+    ParamMouthOpenY: 0.5,
+    ParamCheekpuff: 0.7,
+    ParamEyeOpenL: 0.2,
+    ParamEyeOpenR: 0.2,
   },
   sad: {
-    ParamEyeSmileL: -0.4,
-    ParamEyeSmileR: -0.4,
-    ParamMouthForm: -0.45,
-    ParamBrowFormL: 0.4,
-    ParamBrowFormR: 0.4,
+    ParamEyeSmileL: -0.65,
+    ParamEyeSmileR: -0.65,
+    ParamEyeOpenL: -0.25,
+    ParamEyeOpenR: -0.25,
+    ParamMouthForm: -0.55,
+    ParamMouthOpenY: 0.18,
+    ParamBrowFormL: 0.55,
+    ParamBrowFormR: 0.55,
+    ParamBrowAngleL: 0.35,
+    ParamBrowAngleR: 0.35,
   },
   angry: {
-    ParamEyeSmileL: -0.35,
-    ParamEyeSmileR: -0.35,
-    ParamMouthForm: -0.3,
-    ParamBrowAngleL: 0.6,
-    ParamBrowAngleR: -0.6,
+    ParamEyeSmileL: -0.55,
+    ParamEyeSmileR: -0.55,
+    ParamEyeOpenL: 0.15,
+    ParamEyeOpenR: 0.15,
+    ParamMouthForm: -0.45,
+    ParamMouthOpenY: 0.32,
+    ParamBrowAngleL: 0.85,
+    ParamBrowAngleR: -0.85,
+    ParamCheekpuff: 0.35,
   },
   surprised: {
-    ParamMouthOpenY: 0.7,
-    ParamMouthForm: 0.2,
-    ParamEyeOpenL: 0.1,
-    ParamEyeOpenR: 0.1,
-    ParamBrowAngleL: -0.4,
-    ParamBrowAngleR: -0.4,
+    ParamMouthOpenY: 0.9,
+    ParamMouthForm: 0.25,
+    ParamEyeOpenL: 0.45,
+    ParamEyeOpenR: 0.45,
+    ParamBrowAngleL: -0.6,
+    ParamBrowAngleR: -0.6,
   },
   gentle: {
-    ParamEyeSmileL: 0.45,
-    ParamEyeSmileR: 0.45,
-    ParamMouthForm: 0.35,
+    ParamEyeSmileL: 0.55,
+    ParamEyeSmileR: 0.55,
+    ParamMouthForm: 0.45,
+    ParamMouthOpenY: 0.28,
+    ParamCheekpuff: 0.4,
   },
   confident: {
-    ParamEyeSmileL: 0.25,
-    ParamEyeSmileR: 0.25,
-    ParamMouthForm: 0.4,
-    ParamBrowAngleL: -0.25,
-    ParamBrowAngleR: -0.25,
+    ParamEyeSmileL: 0.35,
+    ParamEyeSmileR: 0.35,
+    ParamEyeOpenL: 0.15,
+    ParamEyeOpenR: 0.15,
+    ParamMouthForm: 0.52,
+    ParamMouthOpenY: 0.3,
+    ParamBrowAngleL: -0.4,
+    ParamBrowAngleR: -0.4,
   },
 };
 
 const KNOWN_EMOTION_PARAMS = Array.from(
-  new Set(Object.values(EMOTION_PRESETS).flatMap((preset) => Object.keys(preset)))
+  new Set(
+    Object.values(EMOTION_PRESETS).flatMap((preset) => Object.keys(preset)),
+  ),
 );
 
 function loadCubismCoreScript(url) {
@@ -98,13 +163,17 @@ function loadCubismCoreScript(url) {
     }
 
     const existingScript =
-      document.querySelector(`script[data-live2d-core="true"][src="${normalizedUrl}"]`) ??
-      document.querySelector(`script[src="${normalizedUrl}"]`);
+      document.querySelector(
+        `script[data-live2d-core="true"][src="${normalizedUrl}"]`,
+      ) ?? document.querySelector(`script[src="${normalizedUrl}"]`);
 
     const errorMessage = `Failed to load Live2D Cubism core script from "${normalizedUrl}".`;
 
     if (existingScript) {
-      if (existingScript.getAttribute("data-live2d-core-loaded") === "true" || window.Live2DCubismCore) {
+      if (
+        existingScript.getAttribute("data-live2d-core-loaded") === "true" ||
+        window.Live2DCubismCore
+      ) {
         resolve();
         return;
       }
@@ -165,7 +234,9 @@ async function ensureCubismCore(scriptUrl = DEFAULT_CORE_SCRIPT_URL) {
   cubismCorePromise = loadCubismCoreScript(scriptUrl)
     .then(() => {
       if (!window.Live2DCubismCore) {
-        throw new Error("Live2DCubismCore global is still missing after loading the script.");
+        throw new Error(
+          "Live2DCubismCore global is still missing after loading the script.",
+        );
       }
     })
     .catch((error) => {
@@ -205,17 +276,20 @@ function resolveBackgroundColor(PIXI, background) {
   return 0x000000;
 }
 
-const Live2DContainer = forwardRef(function Live2DContainer({
-  modelUrl,
-  width = 480,
-  height = 480,
-  eyeStrength = 1.0,
-  background = "transparent",
-  className = "",
-  coreScriptUrl = DEFAULT_CORE_SCRIPT_URL,
-  onReady = undefined,
-  onStatusChange = undefined,
-}, ref) {
+const Live2DContainer = forwardRef(function Live2DContainer(
+  {
+    modelUrl,
+    width = 480,
+    height = 480,
+    eyeStrength = 1.0,
+    background = "transparent",
+    className = "",
+    coreScriptUrl = DEFAULT_CORE_SCRIPT_URL,
+    onReady = undefined,
+    onStatusChange = undefined,
+  },
+  ref,
+) {
   const hostRef = useRef(null);
   const canvasRef = useRef(null);
   const appRef = useRef(null);
@@ -224,7 +298,12 @@ const Live2DContainer = forwardRef(function Live2DContainer({
   const draggingRef = useRef({ dragging: false, offset: { x: 0, y: 0 } });
   const pointerInsideRef = useRef(false);
   const mouthStateRef = useRef({ target: 0, value: 0, holdUntil: 0 });
-  const emotionStateRef = useRef({ label: "neutral", targets: {}, expiresAt: 0, intensity: 0.4 });
+  const emotionStateRef = useRef({
+    label: "neutral",
+    targets: {},
+    expiresAt: 0,
+    intensity: 0.4,
+  });
   const motionStateRef = useRef(null);
   const controlsRef = useRef(null);
   const statusRef = useRef("init");
@@ -240,7 +319,8 @@ const Live2DContainer = forwardRef(function Live2DContainer({
   }, [status, error, onStatusChange]);
 
   const setMouthTarget = useCallback((value = 0, holdMs = 0) => {
-    const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
+    const numeric =
+      typeof value === "number" && Number.isFinite(value) ? value : 0;
     const safeValue = clamp(numeric, 0, 1);
     const state = mouthStateRef.current;
     state.target = safeValue;
@@ -261,7 +341,7 @@ const Live2DContainer = forwardRef(function Live2DContainer({
     const time = now();
     const intensitySource =
       typeof options === "object" && options !== null
-        ? options.intensity ?? options.Intensity ?? 0.65
+        ? (options.intensity ?? options.Intensity ?? 0.65)
         : 0.65;
     const intensity = clamp(
       typeof intensitySource === "number" && Number.isFinite(intensitySource)
@@ -315,9 +395,11 @@ const Live2DContainer = forwardRef(function Live2DContainer({
       const labelSource =
         typeof emotion === "string"
           ? emotion
-          : emotion?.label ?? emotion?.Label ?? "neutral";
+          : (emotion?.label ?? emotion?.Label ?? "neutral");
       const normalizedLabel =
-        typeof labelSource === "string" ? labelSource.toLowerCase().trim() : "neutral";
+        typeof labelSource === "string"
+          ? labelSource.toLowerCase().trim()
+          : "neutral";
       const presetKey = Object.prototype.hasOwnProperty.call(
         EMOTION_PRESETS,
         normalizedLabel,
@@ -347,7 +429,19 @@ const Live2DContainer = forwardRef(function Live2DContainer({
         }
       }
 
-      const duration = 2000 + intensity * 2000;
+      const holdDurationSource =
+        typeof emotion === "object" && emotion !== null
+          ? (emotion.hold_ms ??
+            emotion.holdMs ??
+            emotion.duration_ms ??
+            emotion.DurationMs ??
+            null)
+          : null;
+      let duration = 2000 + intensity * 2000;
+      const holdDurationNumber = Number(holdDurationSource);
+      if (Number.isFinite(holdDurationNumber) && holdDurationNumber > 0) {
+        duration = clamp(holdDurationNumber, 600, 8000);
+      }
 
       emotionStateRef.current = {
         label: presetKey,
@@ -359,7 +453,7 @@ const Live2DContainer = forwardRef(function Live2DContainer({
 
       const suggestedMotion =
         typeof emotion === "object" && emotion !== null
-          ? emotion.suggested_motion ?? emotion.SuggestedMotion ?? ""
+          ? (emotion.suggested_motion ?? emotion.SuggestedMotion ?? "")
           : "";
       if (suggestedMotion) {
         playMotion(String(suggestedMotion), { intensity });
@@ -407,7 +501,11 @@ const Live2DContainer = forwardRef(function Live2DContainer({
       return;
     }
 
-    if (state.expiresAt && time > state.expiresAt && state.label !== "neutral") {
+    if (
+      state.expiresAt &&
+      time > state.expiresAt &&
+      state.label !== "neutral"
+    ) {
       emotionStateRef.current = {
         label: "neutral",
         targets: createEmotionTargetBaseline(),
@@ -521,7 +619,10 @@ const Live2DContainer = forwardRef(function Live2DContainer({
           await ensureCubismCore(coreScriptUrl);
         } catch (coreError) {
           if (coreScriptUrl !== CUBISM_CORE_CDN_URL) {
-            console.warn("[Live2DContainer] Failed to load local Cubism core, falling back to CDN.", coreError);
+            console.warn(
+              "[Live2DContainer] Failed to load local Cubism core, falling back to CDN.",
+              coreError,
+            );
             await ensureCubismCore(CUBISM_CORE_CDN_URL);
           } else {
             throw coreError;
@@ -553,9 +654,16 @@ const Live2DContainer = forwardRef(function Live2DContainer({
           width,
           height,
           backgroundAlpha: isTransparent ? 0 : 1,
-          backgroundColor: isTransparent ? undefined : resolveBackgroundColor(PIXI, background),
+          backgroundColor: isTransparent
+            ? undefined
+            : resolveBackgroundColor(PIXI, background),
           antialias: true,
           powerPreference: "high-performance",
+          resolution:
+            typeof window !== "undefined" && window.devicePixelRatio > 0
+              ? window.devicePixelRatio
+              : 1,
+          maxIfsPerShader: 120,
         });
 
         if (cancelled || !hostRef.current || !canvasRef.current) {
@@ -599,7 +707,10 @@ const Live2DContainer = forwardRef(function Live2DContainer({
           const paddingRatio = 0.06;
           const targetWidth = width * (1 - paddingRatio);
           const targetHeight = height * (1 - paddingRatio);
-          const scale = Math.min(targetWidth / model.width, targetHeight / model.height);
+          const scale = Math.min(
+            targetWidth / model.width,
+            targetHeight / model.height,
+          );
           model.scale.set(scale);
           const verticalOffset = height * 0.1;
           model.position.set(width / 2, height + verticalOffset);
@@ -611,7 +722,10 @@ const Live2DContainer = forwardRef(function Live2DContainer({
           model.on("pointerdown", (event) => {
             const pos = event.data.getLocalPosition(model.parent);
             draggingRef.current.dragging = true;
-            draggingRef.current.offset = { x: model.x - pos.x, y: model.y - pos.y };
+            draggingRef.current.offset = {
+              x: model.x - pos.x,
+              y: model.y - pos.y,
+            };
             model.cursor = "grabbing";
           });
           model.on("pointerup", () => {
@@ -625,7 +739,10 @@ const Live2DContainer = forwardRef(function Live2DContainer({
           model.on("pointermove", (event) => {
             if (!draggingRef.current.dragging) return;
             const pos = event.data.getLocalPosition(model.parent);
-            model.position.set(pos.x + draggingRef.current.offset.x, pos.y + draggingRef.current.offset.y);
+            model.position.set(
+              pos.x + draggingRef.current.offset.x,
+              pos.y + draggingRef.current.offset.y,
+            );
           });
 
           pointerMoveHandler = (evt) => {
@@ -808,7 +925,22 @@ const Live2DContainer = forwardRef(function Live2DContainer({
         dispose = null;
       }
     };
-  }, [modelUrl, width, height, background, eyeStrength, coreScriptUrl, setMouthTarget, playMotion, setEmotionState, clearEmotionState, updateMouthFrame, updateEmotionFrame, updateMotionFrame, onReady]);
+  }, [
+    modelUrl,
+    width,
+    height,
+    background,
+    eyeStrength,
+    coreScriptUrl,
+    setMouthTarget,
+    playMotion,
+    setEmotionState,
+    clearEmotionState,
+    updateMouthFrame,
+    updateEmotionFrame,
+    updateMotionFrame,
+    onReady,
+  ]);
 
   return (
     <div className="flex w-full flex-col items-center gap-3">
@@ -826,7 +958,9 @@ const Live2DContainer = forwardRef(function Live2DContainer({
           <div className="absolute inset-0 grid place-items-center text-sm text-gray-500">
             {status === "loading" && "模型加载中..."}
             {status === "idle" && "请提供 modelUrl 以加载 Live2D 模型"}
-            {status === "error" && <div className="text-red-500">加载失败：{error}</div>}
+            {status === "error" && (
+              <div className="text-red-500">加载失败：{error}</div>
+            )}
           </div>
         )}
       </div>
@@ -838,7 +972,10 @@ const Live2DContainer = forwardRef(function Live2DContainer({
 });
 
 function now() {
-  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+  if (
+    typeof performance !== "undefined" &&
+    typeof performance.now === "function"
+  ) {
     return performance.now();
   }
   return Date.now();
@@ -879,6 +1016,5 @@ function smoothBackTo(coreModel, list) {
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
-
 
 export default Live2DContainer;

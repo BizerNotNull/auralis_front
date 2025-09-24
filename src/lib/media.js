@@ -4,6 +4,12 @@ const RAW_STORAGE_BASE_URL =
     process.env.NEXT_PUBLIC_STORAGE_BASE_URL.trim()) ||
   "";
 
+const RAW_API_BASE_URL =
+  (typeof process !== "undefined" &&
+    typeof process.env?.NEXT_PUBLIC_API_BASE_URL === "string" &&
+    process.env.NEXT_PUBLIC_API_BASE_URL.trim()) ||
+  "http://localhost:8080";
+
 const STORAGE_BASE_URL = RAW_STORAGE_BASE_URL;
 const STORAGE_BASE = STORAGE_BASE_URL
   ? STORAGE_BASE_URL.endsWith("/")
@@ -16,6 +22,17 @@ const MINIO_CONSOLE_PORT_MAP = new Map([
   ["9001", "9000"],
   ["9443", "9000"],
 ]);
+
+function resolveAgainstApi(relative) {
+  if (!RAW_API_BASE_URL) {
+    return "";
+  }
+  try {
+    return new URL(relative, RAW_API_BASE_URL).toString();
+  } catch (error) {
+    return "";
+  }
+}
 
 function normalizeAbsoluteUrl(value) {
   let candidate;
@@ -68,16 +85,18 @@ export function resolveAssetUrl(rawUrl) {
   }
 
   const relative = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  if (relative.startsWith("/live2d/")) {
+    const apiResolved = resolveAgainstApi(relative);
+    if (apiResolved) {
+      return apiResolved;
+    }
+  }
   if (STORAGE_BASE) {
     try {
       return normalizeAbsoluteUrl(new URL(relative, STORAGE_BASE).toString());
     } catch (error) {
       // ignore and fall through
     }
-  }
-
-  if (typeof window !== "undefined" && window.location?.origin) {
-    return `${window.location.origin}${relative}`;
   }
 
   return relative;

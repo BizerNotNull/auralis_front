@@ -72,6 +72,142 @@ function parseExtras(rawExtras) {
   return null;
 }
 
+const EMOTION_DISPLAY_LABELS = {
+  happy: "开心",
+  sad: "伤心",
+  angry: "生气",
+  surprised: "惊讶",
+  gentle: "温柔",
+  confident: "自信",
+  neutral: "平静",
+};
+
+const EMOTION_MOTION_FALLBACKS = {
+  happy: "happy_jump",
+  sad: "sad_drop",
+  angry: "angry_point",
+  surprised: "surprised_react",
+  gentle: "gentle_wave",
+  confident: "pose_proud",
+  neutral: "idle_emphatic",
+};
+
+function normalizeEmotionMeta(rawEmotion) {
+  if (!rawEmotion) {
+    return null;
+  }
+
+  const resolveLabel = (value) => {
+    if (typeof value !== "string") {
+      return "";
+    }
+    return value.trim().toLowerCase();
+  };
+
+  const fallbackMotion = (label) => EMOTION_MOTION_FALLBACKS[label] ?? "";
+
+  if (typeof rawEmotion === "string") {
+    const label = resolveLabel(rawEmotion) || "neutral";
+    const normalizedLabel = EMOTION_DISPLAY_LABELS[label] ? label : "neutral";
+    const displayLabel =
+      EMOTION_DISPLAY_LABELS[normalizedLabel] ?? normalizedLabel;
+    const motion = fallbackMotion(normalizedLabel);
+    const baseIntensity = normalizedLabel === "neutral" ? 0.35 : 0.7;
+    return {
+      label: normalizedLabel,
+      display_label: displayLabel,
+      intensity: baseIntensity,
+      confidence: 0.45,
+      suggested_motion: motion,
+      suggestedMotion: motion,
+      hold_ms: undefined,
+      holdMs: undefined,
+      reason: "",
+    };
+  }
+
+  if (typeof rawEmotion !== "object") {
+    return null;
+  }
+
+  const labelCandidate = [
+    rawEmotion.label,
+    rawEmotion.Label,
+    rawEmotion.emotion,
+    rawEmotion.Emotion,
+    rawEmotion.type,
+    rawEmotion.Type,
+  ]
+    .map(resolveLabel)
+    .find((value) => value);
+  const normalizedLabel = EMOTION_DISPLAY_LABELS[labelCandidate]
+    ? labelCandidate
+    : "neutral";
+  const displayLabel =
+    EMOTION_DISPLAY_LABELS[normalizedLabel] ?? normalizedLabel;
+
+  const intensityCandidate = [
+    rawEmotion.intensity,
+    rawEmotion.Intensity,
+    rawEmotion.score,
+    rawEmotion.Score,
+  ].find((value) => value !== undefined && value !== null && value !== "");
+  let intensityValue = Number(intensityCandidate);
+  if (!Number.isFinite(intensityValue)) {
+    intensityValue = normalizedLabel === "neutral" ? 0.35 : 0.65;
+  }
+  const minIntensity = normalizedLabel === "neutral" ? 0.25 : 0.55;
+  const intensity = clamp(Math.max(intensityValue, minIntensity), 0, 1);
+
+  const confidenceCandidate = [
+    rawEmotion.confidence,
+    rawEmotion.Confidence,
+  ].find((value) => value !== undefined && value !== null && value !== "");
+  let confidenceValue = Number(confidenceCandidate);
+  if (!Number.isFinite(confidenceValue)) {
+    confidenceValue = 0.45;
+  }
+  const confidence = clamp(Math.max(confidenceValue, 0.35), 0, 1);
+
+  const motionCandidate = [
+    rawEmotion.suggested_motion,
+    rawEmotion.SuggestedMotion,
+    rawEmotion.motion,
+    rawEmotion.Motion,
+  ].find((value) => typeof value === "string" && value.trim());
+  const fallback = fallbackMotion(normalizedLabel);
+  const motionKey = motionCandidate ? motionCandidate.trim() : fallback;
+
+  const holdCandidate = [
+    rawEmotion.hold_ms,
+    rawEmotion.holdMs,
+    rawEmotion.duration_ms,
+    rawEmotion.DurationMs,
+  ].find((value) => value !== undefined && value !== null && value !== "");
+  let holdMs;
+  const holdNumber = Number(holdCandidate);
+  if (Number.isFinite(holdNumber) && holdNumber >= 0) {
+    holdMs = holdNumber;
+  }
+
+  const reason =
+    [rawEmotion.reason, rawEmotion.Reason].find(
+      (value) => typeof value === "string" && value.trim(),
+    ) || "";
+
+  return {
+    label: normalizedLabel,
+    display_label: displayLabel,
+    intensity,
+    confidence,
+    suggested_motion: motionKey,
+    suggestedMotion: motionKey,
+    hold_ms: holdMs,
+    holdMs,
+    reason,
+  };
+}
+
 function normalizeMessage(message) {
   if (!message || typeof message !== "object") {
     return null;
@@ -152,6 +288,8 @@ export default function ChatPanel({
   const currentSpeechRef = useRef(null);
   const playedSpeechIdsRef = useRef(new Set());
   const speechAutoPlayRef = useRef(true);
+  const ambientEmotionTimeoutRef = useRef(null);
+  const lastEmotionPreviewIdRef = useRef(null);
   const initialMessagesLoadedRef = useRef(false);
   const lastVoiceIdRef = useRef(null);
   const userSelectedVoiceRef = useRef(false);
@@ -225,8 +363,81 @@ export default function ChatPanel({
     };
   }, [speechErrorHandler]);
 
+  const applyEmotionToAvatar = useCallback(
+    (emotionInput, options = {}) => {
+      if (typeof window === "undefined") {
+        return;
+      }
+      const controls = live2DRef?.current;
+      if (!controls) {
+        return;
+      }
+      const normalized = normalizeEmotionMeta(emotionInput);
+      if (!normalized) {
+        return;
+      }
+      if (ambientEmotionTimeoutRef.current) {
+        window.clearTimeout(ambientEmotionTimeoutRef.current);
+        ambientEmotionTimeoutRef.current = null;
+      }
+      const motionKey =
+        normalized.suggested_motion ??
+        normalized.suggestedMotion ??
+        EMOTION_MOTION_FALLBACKS[normalized.label] ??
+        (normalized.label === "neutral" ? "idle_emphatic" : "");
+      try {
+        controls.setEmotion?.(normalized);
+        if (controls.setMouthOpen) {
+          const target = clamp(
+            0.3 + (normalized.intensity ?? 0.55) * 0.55,
+            0,
+            0.95,
+          );
+          controls.setMouthOpen(target, 220);
+        }
+      } catch (error) {
+        console.warn("Live2D setEmotion failed", error);
+      }
+      if (motionKey) {
+        try {
+          controls.playMotion?.(motionKey, {
+            intensity: clamp((normalized.intensity ?? 0.6) * 1.1, 0.2, 1),
+          });
+        } catch (error) {
+          console.warn("Live2D playMotion failed", error);
+        }
+      }
+      const { autoReset = true, holdMs } = options;
+      if (!autoReset) {
+        return;
+      }
+      const duration =
+        typeof holdMs === "number" && holdMs >= 0
+          ? holdMs
+          : Math.max(1800, Math.floor((normalized.intensity ?? 0.5) * 4800));
+      ambientEmotionTimeoutRef.current = window.setTimeout(() => {
+        try {
+          controls.setEmotion?.({ label: "neutral", intensity: 0.32 });
+          controls.clearEmotion?.();
+          if (controls.setMouthOpen) {
+            controls.setMouthOpen(0.18, 200);
+          }
+        } catch (error) {
+          console.warn("Live2D reset emotion failed", error);
+        } finally {
+          ambientEmotionTimeoutRef.current = null;
+        }
+      }, duration);
+    },
+    [live2DRef],
+  );
+
   const stopSpeechPlayback = useCallback(() => {
     const current = currentSpeechRef.current;
+    if (typeof window !== "undefined" && ambientEmotionTimeoutRef.current) {
+      window.clearTimeout(ambientEmotionTimeoutRef.current);
+      ambientEmotionTimeoutRef.current = null;
+    }
     if (current?.audio) {
       try {
         current.audio.pause();
@@ -234,24 +445,33 @@ export default function ChatPanel({
         console.warn("Failed to pause audio", error);
       }
     }
+    let cleanupHandled = false;
     if (current?.cleanup) {
       try {
         current.cleanup();
+        cleanupHandled = true;
       } catch (error) {
         console.warn("Failed to cleanup speech playback", error);
       }
     }
+    if (!cleanupHandled) {
+      applyEmotionToAvatar(
+        { label: "neutral", intensity: 0.3 },
+        { autoReset: false },
+      );
+    }
     currentSpeechRef.current = null;
     speechQueueRef.current = [];
+    lastEmotionPreviewIdRef.current = null;
     setActiveSpeechId(null);
     const controls = live2DRef?.current;
     if (controls?.setMouthOpen) {
       controls.setMouthOpen(0, 0);
     }
-    if (controls?.clearEmotion) {
-      controls.clearEmotion();
+    if (!cleanupHandled) {
+      controls?.clearEmotion?.();
     }
-  }, [live2DRef]);
+  }, [applyEmotionToAvatar, live2DRef]);
 
   const ensureAudioContext = useCallback(() => {
     if (typeof window === "undefined") {
@@ -288,6 +508,11 @@ export default function ChatPanel({
     if (!next) {
       return;
     }
+    if (typeof window !== "undefined" && ambientEmotionTimeoutRef.current) {
+      window.clearTimeout(ambientEmotionTimeoutRef.current);
+      ambientEmotionTimeoutRef.current = null;
+    }
+    const normalizedEmotion = normalizeEmotionMeta(next.emotion);
     const speech = next.speech;
     const source = speech?.audio_base64;
     if (!source) {
@@ -309,14 +534,25 @@ export default function ChatPanel({
         }
       });
       cleanupFns.length = 0;
+      if (typeof window !== "undefined" && ambientEmotionTimeoutRef.current) {
+        window.clearTimeout(ambientEmotionTimeoutRef.current);
+        ambientEmotionTimeoutRef.current = null;
+      }
       if (controls?.setMouthOpen) {
         controls.setMouthOpen(0, 0);
       }
-      if (controls?.clearEmotion) {
+      if (normalizedEmotion) {
+        applyEmotionToAvatar(
+          { label: "neutral", intensity: 0.3 },
+          { autoReset: false },
+        );
+        controls?.clearEmotion?.();
+      } else if (controls?.clearEmotion) {
         controls.clearEmotion();
       }
       currentSpeechRef.current = null;
       setActiveSpeechId(null);
+      lastEmotionPreviewIdRef.current = null;
     };
     const finishPlayback = () => {
       cleanup();
@@ -421,16 +657,15 @@ export default function ChatPanel({
       audio,
       cleanup,
       messageId: next.id,
+      emotion: normalizedEmotion,
     };
     setActiveSpeechId(next.id);
     setSpeechError(null);
-    if (controls?.setEmotion) {
-      const emotion = next.emotion;
-      if (emotion) {
-        controls.setEmotion(emotion);
-      } else {
-        controls.setEmotion("neutral");
-      }
+    lastEmotionPreviewIdRef.current = next.id;
+    if (normalizedEmotion) {
+      applyEmotionToAvatar(normalizedEmotion, { autoReset: false });
+    } else if (controls?.setEmotion) {
+      controls.setEmotion({ label: "neutral", intensity: 0.35 });
     }
     const playPromise = audio.play();
     if (playPromise?.catch) {
@@ -441,7 +676,7 @@ export default function ChatPanel({
         finishPlayback();
       });
     }
-  }, [ensureAudioContext, live2DRef]);
+  }, [applyEmotionToAvatar, ensureAudioContext, live2DRef]);
 
   const registerSpeech = useCallback(
     (message, options = {}) => {
@@ -451,6 +686,7 @@ export default function ChatPanel({
       }
       const extras = message.extrasParsed;
       const speech = extras?.speech;
+      const emotion = normalizeEmotionMeta(extras?.emotion);
       if (!speech?.audio_base64) {
         return;
       }
@@ -466,6 +702,17 @@ export default function ChatPanel({
         if (markPlayed && !alreadyPlayed) {
           playedSpeechIdsRef.current.add(id);
         }
+        if (enqueue && emotion) {
+          const holdDuration =
+            emotion?.hold_ms ??
+            emotion?.holdMs ??
+            Math.max(1600, Math.floor((emotion.intensity ?? 0.5) * 3200));
+          applyEmotionToAvatar(emotion, {
+            holdMs: holdDuration,
+            autoReset: true,
+          });
+          lastEmotionPreviewIdRef.current = id;
+        }
         return;
       }
       if (markPlayed && !alreadyPlayed) {
@@ -477,11 +724,11 @@ export default function ChatPanel({
       speechQueueRef.current.push({
         id,
         speech,
-        emotion: extras?.emotion ?? null,
+        emotion,
       });
       scheduleNextSpeech();
     },
-    [scheduleNextSpeech],
+    [applyEmotionToAvatar, scheduleNextSpeech],
   );
 
   useEffect(
@@ -1264,7 +1511,9 @@ export default function ChatPanel({
                   activeSpeechId === message.id;
                 const messageExtras = message?.extrasParsed ?? {};
                 const speech = messageExtras?.speech;
-                const emotionMeta = messageExtras?.emotion;
+                const emotionMeta = normalizeEmotionMeta(
+                  messageExtras?.emotion,
+                );
                 const timestamp = formatTimestamp(message?.created_at);
                 return (
                   <li
@@ -1322,10 +1571,11 @@ export default function ChatPanel({
                           {speech?.voice_id ? (
                             <span>音色: {speech.voice_id}</span>
                           ) : null}
-                          {emotionMeta?.label ? (
+                          {emotionMeta?.display_label || emotionMeta?.label ? (
                             <span>
-                              情绪: {emotionMeta.label}
-                              {typeof emotionMeta.intensity === "number"
+                              情绪:{" "}
+                              {emotionMeta?.display_label ?? emotionMeta?.label}
+                              {typeof emotionMeta?.intensity === "number"
                                 ? ` (${emotionMeta.intensity.toFixed(2)})`
                                 : ""}
                             </span>
