@@ -2,11 +2,29 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const API_BASE_URL = "/api/auth";
 
-function mapError(response, fallback) {
+function mapError(response, fallback, serverMessage) {
+  const rawMessage = serverMessage?.toString?.() ?? "";
+  if (rawMessage && /[\u4e00-\u9fa5]/.test(rawMessage)) {
+    return rawMessage;
+  }
+
+  const normalized = rawMessage.toLowerCase().trim();
+  if (normalized) {
+    if (normalized.includes("invalid captcha") || normalized.includes("captcha")) {
+      return "验证码错误";
+    }
+    if (normalized.includes("username already exists")) {
+      return "该用户名已存在";
+    }
+    if (normalized.includes("password")) {
+      return "请设置符合要求的密码";
+    }
+  }
+
   if (!response) {
     return fallback;
   }
@@ -14,21 +32,79 @@ function mapError(response, fallback) {
     return "该用户名已存在";
   }
   if (response.status === 400) {
-    return "用户名或密码不符合要求";
+    return normalized || "用户名和密码不满足要求";
   }
   return fallback;
+}
+
+async function extractServerMessage(response) {
+  try {
+    const payload = await response.clone().json();
+    if (payload && typeof payload === "object") {
+      return payload.error ?? payload.message ?? "";
+    }
+  } catch (error) {
+    // ignore
+  }
+
+  try {
+    return await response.clone().text();
+  } catch (error) {
+    return "";
+  }
 }
 
 export default function RegisterPage() {
   const router = useRouter();
   const [values, setValues] = useState({ username: "", password: "" });
+  const [captcha, setCaptcha] = useState({ id: "", question: "", expiresAt: "", loading: false });
+  const [captchaAnswer, setCaptchaAnswer] = useState("");
+  const [captchaError, setCaptchaError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
+  const loadCaptcha = useCallback(async () => {
+    setCaptcha((prev) => ({ ...prev, loading: true }));
+    setCaptchaError("");
+
+    try {
+      const response = await fetch("/api/auth/captcha", {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`获取验证码失败，${response.status}`);
+      }
+
+      const data = await response.json();
+      const id = data?.captcha_id ?? "";
+      const question = data?.question ?? "";
+      const expiresAt = data?.expires_at ?? "";
+      if (!id || !question) {
+        throw new Error("获取验证码失败");
+      }
+
+      setCaptcha({ id, question, expiresAt, loading: false });
+      setCaptchaAnswer("");
+    } catch (caught) {
+      setCaptcha({ id: "", question: "", expiresAt: "", loading: false });
+      setCaptchaAnswer("");
+      setCaptchaError(caught?.message ?? "验证码刷新失败");
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCaptcha();
+  }, [loadCaptcha]);
+
   const handleChange = (event) => {
     const { name, value } = event.target;
     setValues((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleCaptchaChange = (event) => {
+    setCaptchaAnswer(event.target.value);
   };
 
   const handleSubmit = async (event) => {
@@ -36,6 +112,18 @@ export default function RegisterPage() {
     setError("");
     setSuccess("");
     setSubmitting(true);
+
+    if (!captcha.id) {
+      setError("验证码已失效，请点击刷新后重试");
+      setSubmitting(false);
+      loadCaptcha();
+      return;
+    }
+    if (!captchaAnswer.trim()) {
+      setError("请输入验证码");
+      setSubmitting(false);
+      return;
+    }
 
     try {
       const response = await fetch(`${API_BASE_URL}/register`, {
@@ -47,12 +135,15 @@ export default function RegisterPage() {
         body: JSON.stringify({
           username: values.username.trim(),
           password: values.password,
+          captcha_id: captcha.id,
+          captcha_answer: captchaAnswer.trim(),
         }),
       });
 
       if (!response.ok) {
-        const fallback = `注册失败：${response.status}`;
-        throw new Error(mapError(response, fallback));
+        const serverMessage = await extractServerMessage(response);
+        const fallback = `注册失败，${response.status}`;
+        throw new Error(mapError(response, fallback, serverMessage));
       }
 
       await response.json().catch(() => null);
@@ -63,6 +154,7 @@ export default function RegisterPage() {
     } catch (caught) {
       const message = caught?.message ?? "注册失败";
       setError(message);
+      loadCaptcha();
     } finally {
       setSubmitting(false);
     }
@@ -72,7 +164,7 @@ export default function RegisterPage() {
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-50 via-white to-slate-100 px-4 py-10">
       <div className="w-full max-w-md rounded-3xl border border-slate-200/60 bg-white/80 p-8 shadow-2xl backdrop-blur">
         <h1 className="text-2xl font-semibold text-slate-900">注册账号</h1>
-        <p className="mt-2 text-sm text-slate-500">创建属于你的账号以体验智能体功能。</p>
+        <p className="mt-2 text-sm text-slate-500">创建账号后即可管理你的专属智能体。</p>
 
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           <div className="space-y-2">
@@ -88,7 +180,7 @@ export default function RegisterPage() {
               value={values.username}
               onChange={handleChange}
               className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-              placeholder="输入用户名"
+              placeholder="请输入用户名"
             />
           </div>
 
@@ -108,6 +200,39 @@ export default function RegisterPage() {
               className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
               placeholder="至少 6 位密码"
             />
+          </div>
+
+          <div className="space-y-2">
+            <label htmlFor="captcha" className="block text-sm font-medium text-slate-600">
+              验证码
+            </label>
+            <div className="flex flex-wrap items-center gap-3">
+              <input
+                id="captcha"
+                name="captcha"
+                type="text"
+                required
+                minLength={1}
+                value={captchaAnswer}
+                onChange={handleCaptchaChange}
+                className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                placeholder="请回答验证码"
+              />
+              <button
+                type="button"
+                onClick={loadCaptcha}
+                disabled={captcha.loading || submitting}
+                className="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:text-slate-300"
+              >
+                {captcha.loading ? "获取中..." : "刷新验证码"}
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              {captcha.question ? `请计算：${captcha.question}` : "请点击刷新获取验证码"}
+            </p>
+            {captchaError ? (
+              <p className="text-xs text-red-500">{captchaError}</p>
+            ) : null}
           </div>
 
           {error ? (
@@ -130,7 +255,7 @@ export default function RegisterPage() {
         <p className="mt-6 text-center text-sm text-slate-500">
           已经有账号？
           <Link href="/login" className="ml-1 font-medium text-blue-500 hover:text-blue-600">
-            立即登录
+            去登录
           </Link>
         </p>
       </div>

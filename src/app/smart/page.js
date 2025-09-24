@@ -3,6 +3,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { resolveAssetUrl } from "@/lib/media";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
@@ -176,7 +177,7 @@ export default function AgentDirectoryPage() {
                 console.warn("Failed to parse agent tags", error);
               }
 
-              const avatarUrl = agent?.avatar_url ?? agent?.avatarUrl ?? "";
+              const avatarUrl = resolveAssetUrl(agent?.avatar_url ?? agent?.avatarUrl ?? "");
 
               return (
                 <article

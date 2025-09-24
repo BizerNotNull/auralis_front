@@ -10,7 +10,7 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 const YUMI_MODEL_URL = "/yumi/yumi.model3.json";
 
-export default function SmartPage() {
+export default function SmartPhonePage() {
   const params = useParams();
   const paramsId = params?.id;
   const smartId = Array.isArray(paramsId) ? paramsId[0] : paramsId;
@@ -82,9 +82,8 @@ export default function SmartPage() {
     if (agent?.first_turn_hint) {
       return agent.first_turn_hint;
     }
-    return "自定义智能体正在等待与您建立连接。";
+    return "语音电话模式就绪，随时可以与智能体对话。";
   }, [agent?.persona_desc, agent?.first_turn_hint]);
-
 
   const live2DModelRaw = agent?.live2d_model_id
     ? agent.live2d_model_id
@@ -107,45 +106,51 @@ export default function SmartPage() {
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-8 px-6">
         <header className="flex flex-col gap-2 text-gray-700">
           <span className="text-sm uppercase tracking-wide text-gray-400">
-            Smart Agent
+            Voice Call
           </span>
           <h1 className="text-2xl font-semibold text-gray-900">
-            {agentName ? `智能体：${agentName}` : "智能体"}
+            {agentName ? `电话通话 · ${agentName}` : "语音通话"}
           </h1>
           <p className="text-sm text-gray-500">
-            {agentStatus.error ? agentStatus.error : agentDescription}
+            {agentStatus.error
+              ? agentStatus.error
+              : agentDescription}
+          </p>
+          <p className="text-xs text-gray-400">
+            提示：请确保麦克风权限已开启，挂断后可通过页面右上角返回文字聊天。
           </p>
         </header>
 
-        <div className="flex flex-1 flex-col gap-6 lg:h-[720px] lg:flex-row">
-          <div className="flex justify-center lg:w-[460px]">
-            <div className="flex w-full max-w-[420px] flex-col items-center rounded-3xl border border-white/40 bg-white/70 p-4 shadow-xl backdrop-blur">
-              <Live2DContainer
-                key={live2DModel || "live2d-agent"}
-                ref={live2DRef}
-                modelUrl={live2DModel}
-                width={400}
-                height={600}
-                className="bg-white"
-                background="transparent"
-                onStatusChange={handleLive2DStatusChange}
-              />
+        <div className="flex flex-1 flex-col gap-6 lg:min-h-[760px]">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+            <div className="flex justify-center lg:w-[500px]">
+              <div className="flex w-full max-w-[460px] flex-col items-center rounded-3xl border border-white/40 bg-white/70 p-4 shadow-xl backdrop-blur">
+                <Live2DContainer
+                  key={live2DModel || "live2d-agent-call"}
+                  ref={live2DRef}
+                  modelUrl={live2DModel}
+                  width={440}
+                  height={640}
+                  className="bg-white"
+                  background="transparent"
+                  onStatusChange={handleLive2DStatusChange}
+                />
+              </div>
             </div>
 
-          </div>
-
-          <div className="flex flex-1 min-h-0">
-            <ChatPanel
-              agentId={agentId || undefined}
-              agent={agent}
-              live2DRef={live2DRef}
-              live2DStatus={live2DStatus}
-              live2DError={live2DError}
-            />
+            <div className="flex flex-1 min-h-0">
+              <ChatPanel
+                agentId={agentId || undefined}
+                agent={agent}
+                live2DRef={live2DRef}
+                live2DStatus={live2DStatus}
+                live2DError={live2DError}
+                mode="phone"
+              />
+            </div>
           </div>
         </div>
       </div>
     </div>
   );
 }
-
