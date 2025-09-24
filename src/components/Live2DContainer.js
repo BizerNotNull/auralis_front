@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 
 /**
  * Live2DContainer
@@ -21,6 +21,68 @@ const DEFAULT_CORE_SCRIPT_URL = "/live2d/live2dcubismcore.min.js";
 const CUBISM_CORE_CDN_URL = "https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js";
 
 let cubismCorePromise;
+
+const MOTION_PRESETS = {
+  happy_jump: { duration: 1600, params: { ParamBodyAngleX: 10, ParamBodyAngleY: 6, ParamAngleZ: 12 } },
+  happy_smile: { duration: 1200, params: { ParamBodyAngleX: 4, ParamBodyAngleY: 3, ParamAngleZ: 6 } },
+  sad_drop: { duration: 1800, params: { ParamBodyAngleX: -8, ParamBodyAngleY: -6, ParamAngleZ: -6 } },
+  sad_idle: { duration: 1400, params: { ParamBodyAngleX: -3, ParamBodyAngleY: -2 } },
+  angry_point: { duration: 1500, params: { ParamBodyAngleX: 6, ParamBodyAngleY: -4, ParamAngleZ: 8 } },
+  angry_idle: { duration: 1200, params: { ParamBodyAngleX: 3, ParamBodyAngleY: -2 } },
+  surprised_react: { duration: 1600, params: { ParamBodyAngleX: 5, ParamBodyAngleY: 8, ParamAngleZ: -6 } },
+  pose_proud: { duration: 2000, params: { ParamBodyAngleX: 6, ParamBodyAngleY: 4, ParamAngleZ: -4 } },
+  gentle_wave: { duration: 2000, params: { ParamBodyAngleX: 4, ParamBodyAngleY: 2 } },
+  idle_emphatic: { duration: 1400, params: { ParamBodyAngleX: 3, ParamBodyAngleY: 2 } },
+  idle_breathe: { duration: 1600, params: { ParamBodyAngleX: 1.5, ParamBodyAngleY: 1.5 } },
+};
+
+const EMOTION_PRESETS = {
+  neutral: {},
+  happy: {
+    ParamEyeSmileL: 0.6,
+    ParamEyeSmileR: 0.6,
+    ParamMouthForm: 0.5,
+    ParamCheekpuff: 0.35,
+  },
+  sad: {
+    ParamEyeSmileL: -0.4,
+    ParamEyeSmileR: -0.4,
+    ParamMouthForm: -0.45,
+    ParamBrowFormL: 0.4,
+    ParamBrowFormR: 0.4,
+  },
+  angry: {
+    ParamEyeSmileL: -0.35,
+    ParamEyeSmileR: -0.35,
+    ParamMouthForm: -0.3,
+    ParamBrowAngleL: 0.6,
+    ParamBrowAngleR: -0.6,
+  },
+  surprised: {
+    ParamMouthOpenY: 0.7,
+    ParamMouthForm: 0.2,
+    ParamEyeOpenL: 0.1,
+    ParamEyeOpenR: 0.1,
+    ParamBrowAngleL: -0.4,
+    ParamBrowAngleR: -0.4,
+  },
+  gentle: {
+    ParamEyeSmileL: 0.45,
+    ParamEyeSmileR: 0.45,
+    ParamMouthForm: 0.35,
+  },
+  confident: {
+    ParamEyeSmileL: 0.25,
+    ParamEyeSmileR: 0.25,
+    ParamMouthForm: 0.4,
+    ParamBrowAngleL: -0.25,
+    ParamBrowAngleR: -0.25,
+  },
+};
+
+const KNOWN_EMOTION_PARAMS = Array.from(
+  new Set(Object.values(EMOTION_PRESETS).flatMap((preset) => Object.keys(preset)))
+);
 
 function loadCubismCoreScript(url) {
   return new Promise((resolve, reject) => {
@@ -143,7 +205,7 @@ function resolveBackgroundColor(PIXI, background) {
   return 0x000000;
 }
 
-export default function Live2DContainer({
+const Live2DContainer = forwardRef(function Live2DContainer({
   modelUrl,
   width = 480,
   height = 480,
@@ -151,7 +213,9 @@ export default function Live2DContainer({
   background = "transparent",
   className = "",
   coreScriptUrl = DEFAULT_CORE_SCRIPT_URL,
-}) {
+  onReady = undefined,
+  onStatusChange = undefined,
+}, ref) {
   const hostRef = useRef(null);
   const canvasRef = useRef(null);
   const appRef = useRef(null);
@@ -159,9 +223,277 @@ export default function Live2DContainer({
   const rafRef = useRef(null);
   const draggingRef = useRef({ dragging: false, offset: { x: 0, y: 0 } });
   const pointerInsideRef = useRef(false);
+  const mouthStateRef = useRef({ target: 0, value: 0, holdUntil: 0 });
+  const emotionStateRef = useRef({ label: "neutral", targets: {}, expiresAt: 0, intensity: 0.4 });
+  const motionStateRef = useRef(null);
+  const controlsRef = useRef(null);
+  const statusRef = useRef("init");
 
   const [status, setStatus] = useState("init");
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    statusRef.current = status;
+    if (typeof onStatusChange === "function") {
+      onStatusChange(status, error);
+    }
+  }, [status, error, onStatusChange]);
+
+  const setMouthTarget = useCallback((value = 0, holdMs = 0) => {
+    const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
+    const safeValue = clamp(numeric, 0, 1);
+    const state = mouthStateRef.current;
+    state.target = safeValue;
+    const time = now();
+    if (safeValue > 0.02) {
+      state.holdUntil = time + Math.max(holdMs, 120);
+    } else {
+      state.holdUntil = time;
+    }
+  }, []);
+
+  const playMotion = useCallback((motion, options = {}) => {
+    const name = typeof motion === "string" ? motion.trim() : "";
+    if (!name) {
+      return;
+    }
+    const preset = MOTION_PRESETS[name];
+    const time = now();
+    const intensitySource =
+      typeof options === "object" && options !== null
+        ? options.intensity ?? options.Intensity ?? 0.65
+        : 0.65;
+    const intensity = clamp(
+      typeof intensitySource === "number" && Number.isFinite(intensitySource)
+        ? intensitySource
+        : 0.65,
+      0,
+      1,
+    );
+
+    if (!preset) {
+      motionStateRef.current = {
+        params: {
+          ParamBodyAngleX: 4 * intensity,
+          ParamBodyAngleY: 3 * intensity,
+          ParamAngleZ: 5 * intensity,
+        },
+        expiresAt: time + 1200,
+        fadeOut: 360,
+      };
+      return;
+    }
+
+    const params = {};
+    for (const [param, value] of Object.entries(preset.params ?? {})) {
+      params[param] = value * (0.4 + intensity * 0.6);
+    }
+
+    motionStateRef.current = {
+      params,
+      expiresAt: time + (preset.duration ?? 1400),
+      fadeOut: 400,
+    };
+  }, []);
+
+  const setEmotionState = useCallback(
+    (emotion) => {
+      const time = now();
+      const targets = createEmotionTargetBaseline();
+
+      if (!emotion) {
+        emotionStateRef.current = {
+          label: "neutral",
+          targets,
+          intensity: 0.35,
+          expiresAt: time + 1200,
+          mouthBoost: 0,
+        };
+        return;
+      }
+
+      const labelSource =
+        typeof emotion === "string"
+          ? emotion
+          : emotion?.label ?? emotion?.Label ?? "neutral";
+      const normalizedLabel =
+        typeof labelSource === "string" ? labelSource.toLowerCase().trim() : "neutral";
+      const presetKey = Object.prototype.hasOwnProperty.call(
+        EMOTION_PRESETS,
+        normalizedLabel,
+      )
+        ? normalizedLabel
+        : "neutral";
+
+      const rawIntensity =
+        typeof emotion === "object" && emotion !== null
+          ? typeof emotion.intensity === "number"
+            ? emotion.intensity
+            : typeof emotion.Intensity === "number"
+              ? emotion.Intensity
+              : 0.5
+          : 0.5;
+      const intensity = clamp(rawIntensity, 0, 1);
+
+      const preset = EMOTION_PRESETS[presetKey] ?? EMOTION_PRESETS.neutral;
+      let mouthBoost = 0;
+
+      for (const [param, value] of Object.entries(preset)) {
+        const scaled = value * (0.4 + intensity * 0.6);
+        if (param === "ParamMouthOpenY") {
+          mouthBoost = clamp(Math.abs(scaled), 0, 1);
+        } else {
+          targets[param] = scaled;
+        }
+      }
+
+      const duration = 2000 + intensity * 2000;
+
+      emotionStateRef.current = {
+        label: presetKey,
+        targets,
+        intensity,
+        expiresAt: time + duration,
+        mouthBoost,
+      };
+
+      const suggestedMotion =
+        typeof emotion === "object" && emotion !== null
+          ? emotion.suggested_motion ?? emotion.SuggestedMotion ?? ""
+          : "";
+      if (suggestedMotion) {
+        playMotion(String(suggestedMotion), { intensity });
+      }
+    },
+    [playMotion],
+  );
+
+  const clearEmotionState = useCallback(() => {
+    setEmotionState(null);
+  }, [setEmotionState]);
+
+  const updateMouthFrame = useCallback((coreModel) => {
+    if (!coreModel) {
+      return;
+    }
+    const state = mouthStateRef.current;
+    const emotion = emotionStateRef.current;
+    const time = now();
+
+    if (state.holdUntil && time > state.holdUntil && state.target < 0.05) {
+      state.target = 0;
+    }
+
+    const target = Math.max(state.target, emotion?.mouthBoost ?? 0);
+    const smoothing = target > state.value ? 0.35 : 0.22;
+    const next = state.value + (target - state.value) * smoothing;
+    state.value = clamp(next, 0, 1);
+
+    try {
+      coreModel.setParameterValueById("ParamMouthOpenY", state.value);
+    } catch (error) {
+      // ignore missing parameter
+    }
+  }, []);
+
+  const updateEmotionFrame = useCallback((coreModel) => {
+    if (!coreModel) {
+      return;
+    }
+    const state = emotionStateRef.current;
+    const time = now();
+
+    if (!state) {
+      return;
+    }
+
+    if (state.expiresAt && time > state.expiresAt && state.label !== "neutral") {
+      emotionStateRef.current = {
+        label: "neutral",
+        targets: createEmotionTargetBaseline(),
+        intensity: 0.3,
+        expiresAt: time + 1000,
+        mouthBoost: 0,
+      };
+    }
+
+    const active = emotionStateRef.current;
+    const targets = active.targets ?? {};
+    const lerpStrength = 0.12 + (active.intensity ?? 0.3) * 0.12;
+
+    for (const param of KNOWN_EMOTION_PARAMS) {
+      if (param === "ParamMouthOpenY") {
+        continue;
+      }
+      const goal = targets[param] ?? 0;
+      setParam(coreModel, param, goal, lerpStrength);
+    }
+  }, []);
+
+  const updateMotionFrame = useCallback((coreModel) => {
+    if (!coreModel) {
+      return;
+    }
+    const motion = motionStateRef.current;
+    if (!motion) {
+      return;
+    }
+    const time = now();
+    const params = motion.params ?? {};
+
+    if (motion.expiresAt && time > motion.expiresAt) {
+      const fade = motion.fadeOut ?? 320;
+      const elapsed = time - motion.expiresAt;
+      if (elapsed >= fade) {
+        motionStateRef.current = null;
+        return;
+      }
+      const factor = clamp(1 - elapsed / fade, 0, 1);
+      for (const [param, value] of Object.entries(params)) {
+        setParam(coreModel, param, value * factor, 0.2);
+      }
+      return;
+    }
+
+    for (const [param, value] of Object.entries(params)) {
+      setParam(coreModel, param, value, 0.2);
+    }
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    setMouthOpen: (value, holdMs) => {
+      const controls = controlsRef.current;
+      if (controls?.setMouthOpen) {
+        controls.setMouthOpen(value, holdMs);
+        return;
+      }
+      setMouthTarget(value, holdMs);
+    },
+    setEmotion: (emotion) => {
+      const controls = controlsRef.current;
+      if (controls?.setEmotion) {
+        controls.setEmotion(emotion);
+        return;
+      }
+      setEmotionState(emotion);
+    },
+    clearEmotion: () => {
+      const controls = controlsRef.current;
+      if (controls?.clearEmotion) {
+        controls.clearEmotion();
+        return;
+      }
+      clearEmotionState();
+    },
+    playMotion: (motion, options) => {
+      const controls = controlsRef.current;
+      if (controls?.playMotion) {
+        controls.playMotion(motion, options);
+        return;
+      }
+      playMotion(motion, options);
+    },
+  }));
 
   const hostClasses = [
     "relative overflow-hidden rounded-2xl shadow-lg ring-1 ring-black/5 select-none",
@@ -250,6 +582,19 @@ export default function Live2DContainer({
           }
 
           modelRef.current = model;
+
+          const controls = {
+            setMouthOpen: (value, holdMs) => setMouthTarget(value, holdMs),
+            setEmotion: setEmotionState,
+            clearEmotion: clearEmotionState,
+            playMotion,
+          };
+          controlsRef.current = controls;
+          clearEmotionState();
+          setMouthTarget(0, 0);
+          if (typeof onReady === "function") {
+            onReady(controls);
+          }
 
           const paddingRatio = 0.06;
           const targetWidth = width * (1 - paddingRatio);
@@ -342,12 +687,16 @@ export default function Live2DContainer({
 
             model.update(app.ticker.deltaMS);
 
+            const core = model.internalModel.coreModel;
+            updateMouthFrame(core);
+            updateEmotionFrame(core);
+            updateMotionFrame(core);
+
             if (pointerInsideRef.current || draggingRef.current.dragging) {
               return;
             }
 
             idleClock += app.ticker.deltaMS / 1000;
-            const core = model.internalModel.coreModel;
 
             const sway = Math.sin(idleClock * 1.2);
             const nod = Math.sin(idleClock * 0.8);
@@ -403,12 +752,38 @@ export default function Live2DContainer({
           } finally {
             appRef.current = null;
             modelRef.current = null;
+            controlsRef.current = null;
+            mouthStateRef.current = { target: 0, value: 0, holdUntil: 0 };
+            emotionStateRef.current = {
+              label: "neutral",
+              targets: createEmotionTargetBaseline(),
+              intensity: 0.3,
+              expiresAt: now() + 1000,
+              mouthBoost: 0,
+            };
+            motionStateRef.current = null;
+            if (typeof onReady === "function") {
+              onReady(null);
+            }
           }
         };
 
         return cleanup;
       } catch (err) {
         console.error(err);
+        controlsRef.current = null;
+        motionStateRef.current = null;
+        mouthStateRef.current = { target: 0, value: 0, holdUntil: 0 };
+        emotionStateRef.current = {
+          label: "neutral",
+          targets: createEmotionTargetBaseline(),
+          intensity: 0.3,
+          expiresAt: now() + 1000,
+          mouthBoost: 0,
+        };
+        if (typeof onReady === "function") {
+          onReady(null);
+        }
         if (!cancelled) {
           setError(err?.message || String(err));
           setStatus("error");
@@ -433,7 +808,7 @@ export default function Live2DContainer({
         dispose = null;
       }
     };
-  }, [modelUrl, width, height, background, eyeStrength, coreScriptUrl]);
+  }, [modelUrl, width, height, background, eyeStrength, coreScriptUrl, setMouthTarget, playMotion, setEmotionState, clearEmotionState, updateMouthFrame, updateEmotionFrame, updateMotionFrame, onReady]);
 
   return (
     <div className="flex w-full flex-col items-center gap-3">
@@ -460,6 +835,24 @@ export default function Live2DContainer({
       </div>
     </div>
   );
+});
+
+function now() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function createEmotionTargetBaseline() {
+  const baseline = {};
+  for (const key of KNOWN_EMOTION_PARAMS) {
+    if (key === "ParamMouthOpenY") {
+      continue;
+    }
+    baseline[key] = 0;
+  }
+  return baseline;
 }
 
 function setParam(coreModel, id, target, lerp = 0.3) {
@@ -486,3 +879,6 @@ function smoothBackTo(coreModel, list) {
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
+
+
+export default Live2DContainer;

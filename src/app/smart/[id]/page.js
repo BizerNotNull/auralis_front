@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Live2DContainer from "@/components/Live2DContainer";
 import ChatPanel from "@/components/chat/ChatPanel";
@@ -22,11 +22,22 @@ export default function SmartPage() {
     error: null,
   });
 
+  const live2DRef = useRef(null);
+  const [live2DStatus, setLive2DStatus] = useState("init");
+  const [live2DError, setLive2DError] = useState(null);
+
+  const handleLive2DStatusChange = useCallback((status, errorMessage) => {
+    setLive2DStatus(status);
+    setLive2DError(errorMessage ?? null);
+  }, []);
+
   useEffect(() => {
     if (!agentId) {
       return;
     }
     let aborted = false;
+    setLive2DStatus("init");
+    setLive2DError(null);
     setAgentStatus({ loading: true, error: null });
     (async () => {
       try {
@@ -97,18 +108,26 @@ export default function SmartPage() {
           <div className="flex justify-center lg:w-[460px]">
             <div className="flex w-full max-w-[420px] flex-col items-center rounded-3xl border border-white/40 bg-white/70 p-4 shadow-xl backdrop-blur">
               <Live2DContainer
+                ref={live2DRef}
                 modelUrl={live2DModel}
                 width={400}
                 height={600}
                 className="bg-white"
                 background="transparent"
+                onStatusChange={handleLive2DStatusChange}
               />
             </div>
 
           </div>
 
           <div className="flex flex-1 min-h-0">
-            <ChatPanel agentId={agentId || undefined} agent={agent} />
+            <ChatPanel
+              agentId={agentId || undefined}
+              agent={agent}
+              live2DRef={live2DRef}
+              live2DStatus={live2DStatus}
+              live2DError={live2DError}
+            />
           </div>
         </div>
       </div>

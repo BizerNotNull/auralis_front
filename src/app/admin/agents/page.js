@@ -3,6 +3,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { resolveAssetUrl } from "@/lib/media";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
@@ -418,7 +419,7 @@ export default function AdminAgentsPage() {
               <ul className="space-y-2">
                 {agents.map((agent) => {
                   const agentId = agent?.id ?? agent?.ID;
-                  const avatarUrl = agent?.avatar_url ?? agent?.avatarUrl ?? "";
+                  const avatarUrl = resolveAssetUrl(agent?.avatar_url ?? agent?.avatarUrl ?? "");
                   const isActive = agentId === selectedAgentId;
                   const name = agent?.name ?? `Agent ${agentId ?? ""}`;
                   const initial = name.trim()?.charAt(0)?.toUpperCase() ?? "A";
@@ -524,7 +525,7 @@ export default function AdminAgentsPage() {
                         />
                       ) : formValues.avatar_url ? (
                         <img
-                          src={formValues.avatar_url}
+                          src={resolveAssetUrl(formValues.avatar_url)}
                           alt="Current avatar"
                           className="h-28 w-28 rounded-full object-cover shadow"
                         />
