@@ -29,6 +29,7 @@ export default function SmartPage() {
   });
   const ratingControllerRef = useRef(null);
   const [ratingControllerReady, setRatingControllerReady] = useState(false);
+  const [ratingReviewsReady, setRatingReviewsReady] = useState(false);
 
   const live2DRef = useRef(null);
   const [live2DStatus, setLive2DStatus] = useState("init");
@@ -142,11 +143,23 @@ export default function SmartPage() {
 
   const handleRatingControllerChange = useCallback((controller) => {
     ratingControllerRef.current = controller;
-    setRatingControllerReady(Boolean(controller?.open));
+    setRatingControllerReady(
+      Boolean(controller?.openRatingForm ?? controller?.open),
+    );
+    setRatingReviewsReady(Boolean(controller?.openReviews));
   }, []);
 
   const handleOpenRatingModalFromHeader = useCallback(() => {
-    ratingControllerRef.current?.open?.();
+    const controller = ratingControllerRef.current;
+    if (!controller) {
+      return;
+    }
+    const opener = controller.openRatingForm ?? controller.open;
+    opener?.();
+  }, []);
+
+  const handleOpenReviewsModalFromHeader = useCallback(() => {
+    ratingControllerRef.current?.openReviews?.();
   }, []);
 
   const agentName = agent?.name ? agent.name : agentId || "Unknown";
@@ -192,6 +205,14 @@ export default function SmartPage() {
               className="rounded-full border border-amber-200 px-4 py-1.5 text-sm font-medium text-amber-600 transition hover:border-amber-300 hover:text-amber-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
             >
               评价智能体
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenReviewsModalFromHeader}
+              disabled={!ratingReviewsReady}
+              className="rounded-full border border-amber-200 px-4 py-1.5 text-sm font-medium text-amber-600 transition hover:border-amber-300 hover:text-amber-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+            >
+              查看用户评价
             </button>
           </div>
           <p className="text-sm text-gray-500">

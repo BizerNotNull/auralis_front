@@ -139,7 +139,13 @@ function extractUserPayload(payload) {
   if (nested && typeof nested === "object") {
     return nested;
   }
-  const indicativeKeys = ["id", "username", "nickname", "display_name", "displayName"];
+  const indicativeKeys = [
+    "id",
+    "username",
+    "nickname",
+    "display_name",
+    "displayName",
+  ];
   if (indicativeKeys.some((key) => key in payload)) {
     return payload;
   }
@@ -215,7 +221,11 @@ async function fetchAgents(apiBaseUrl, token) {
     if (token) {
       headers.set("Authorization", `Bearer ${token}`);
     }
-    const response = await fetch(buildEndpoint(apiBaseUrl, "/agents"), {
+    const endpoint = new URL(buildEndpoint(apiBaseUrl, "/agents"));
+    endpoint.searchParams.set("sort", "hot");
+    endpoint.searchParams.set("limit", "6");
+
+    const response = await fetch(endpoint.toString(), {
       method: "GET",
       headers,
       cache: "no-store",
@@ -254,7 +264,12 @@ export default async function Home() {
   ]);
 
   const loggedIn = Boolean(user);
-  const displayName = (user?.nickname ?? user?.display_name ?? user?.username ?? "").trim();
+  const displayName = (
+    user?.nickname ??
+    user?.display_name ??
+    user?.username ??
+    ""
+  ).trim();
   const headerDisplayName = displayName || "我的主页";
   const avatarUrl = typeof user?.avatar_url === "string" ? user.avatar_url : "";
   const visibleAgents = agents.slice(0, 6);

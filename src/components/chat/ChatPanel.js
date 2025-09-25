@@ -94,6 +94,9 @@ const DEFAULT_RATING_SUMMARY = {
   rating_count: 0,
 };
 
+const DEFAULT_REVIEWS_PAGE_SIZE = 10;
+const MAX_REVIEWS_PAGE_SIZE = 50;
+
 function normalizeRatingSummary(summary) {
   if (!summary || typeof summary !== "object") {
     return { ...DEFAULT_RATING_SUMMARY };
@@ -137,6 +140,69 @@ function normalizeUserRating(rating) {
     comment: commentValue,
     updated_at: rating.updated_at ?? rating.updatedAt ?? null,
   };
+}
+
+function normalizePeerRating(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const rawScore = Number(
+    entry.score ?? entry.Score ?? entry.rating ?? entry.Rating ?? 0,
+  );
+  if (!Number.isFinite(rawScore) || rawScore <= 0) {
+    return null;
+  }
+  const score = Math.max(1, Math.min(5, Math.round(rawScore)));
+
+  const idValue = entry.id ?? entry.ID ?? entry.rating_id ?? entry.ratingId ?? null;
+  const agentIdValue = entry.agent_id ?? entry.agentId ?? null;
+  const userIdValue = entry.user_id ?? entry.userId ?? null;
+
+  const commentValue = (() => {
+    const raw = entry.comment ?? entry.Comment ?? "";
+    return typeof raw === "string" ? raw : "";
+  })();
+
+  const createdAtValue =
+    entry.created_at ?? entry.createdAt ?? entry.CreatedAt ?? null;
+  const updatedAtValue =
+    entry.updated_at ?? entry.updatedAt ?? entry.UpdatedAt ?? createdAtValue;
+
+  const displayNameRaw =
+    entry.user_display_name ?? entry.userDisplayName ?? entry.display_name ?? "";
+  const userDisplayName =
+    typeof displayNameRaw === "string" && displayNameRaw.trim()
+      ? displayNameRaw.trim()
+      : "匿名用户";
+
+  const avatarRaw =
+    entry.user_avatar_url ?? entry.userAvatarUrl ?? entry.avatar_url ?? null;
+  const userAvatarUrl =
+    typeof avatarRaw === "string" && avatarRaw.trim() ? avatarRaw.trim() : null;
+
+  const normalized = {
+    id: idValue != null ? String(idValue) : null,
+    agentId: agentIdValue != null ? String(agentIdValue) : null,
+    userId: userIdValue != null ? String(userIdValue) : null,
+    score,
+    comment: commentValue,
+    createdAt: createdAtValue ?? null,
+    updatedAt: updatedAtValue ?? null,
+    userDisplayName,
+    userAvatarUrl,
+  };
+
+  if (!normalized.id) {
+    const fallbackKeyParts = [
+      normalized.userId ?? "anonymous",
+      normalized.updatedAt ?? normalized.createdAt ?? Date.now().toString(),
+      normalized.score,
+    ];
+    normalized.id = fallbackKeyParts.join(":");
+  }
+
+  return normalized;
 }
 
 const EMOTION_DISPLAY_LABELS = {
@@ -344,8 +410,22 @@ export default function ChatPanel({
     error: null,
     success: false,
   });
+  const [peerRatings, setPeerRatings] = useState([]);
+  const [peerRatingsStatus, setPeerRatingsStatus] = useState({
+    loading: false,
+    error: null,
+    appending: false,
+  });
+  const [peerRatingsPageInfo, setPeerRatingsPageInfo] = useState({
+    page: 1,
+    pageSize: DEFAULT_REVIEWS_PAGE_SIZE,
+    total: 0,
+  });
+  const [reviewsModalOpen, setReviewsModalOpen] = useState(false);
+  const [peerRatingsFetched, setPeerRatingsFetched] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
   const ratingControllerRef = useRef(null);
+  const peerRatingsPageSizeRef = useRef(DEFAULT_REVIEWS_PAGE_SIZE);
   const recognitionRef = useRef(null);
 
   useEffect(() => {
@@ -413,6 +493,10 @@ export default function ChatPanel({
   const [microphoneActive, setMicrophoneActive] = useState(true);
   const phoneVoiceLoopRef = useRef(false);
   const handleVoiceTranscriptRef = useRef(null);
+
+  const hasMorePeerRatings = peerRatings.length < peerRatingsPageInfo.total;
+  const isInitialPeerRatingsLoading =
+    peerRatingsStatus.loading && peerRatings.length === 0;
 
   const audioContextRef = useRef(null);
   const speechQueueRef = useRef([]);
@@ -1136,28 +1220,45 @@ export default function ChatPanel({
     }
   }, [agentId, handleUnauthorizedResponse]);
 
-  useEffect(() => {
-    if (!agentId || !userId) {
-      return;
-    }
-    let aborted = false;
-    const controller = new AbortController();
+  const fetchAgentRatings = useCallback(
+    async ({ page = 1, append = false, signal } = {}) => {
+      if (!agentId) {
+        return;
+      }
 
-    const fetchRatings = async () => {
-      setRatingStatus({ loading: true, error: null });
+      const shouldUpdateRatingStatus = !append;
+      if (shouldUpdateRatingStatus) {
+        setRatingStatus({ loading: true, error: null });
+      }
+      setPeerRatingsStatus({ loading: true, error: null, appending: append });
+
       try {
+        const currentPageSize = Math.min(
+          MAX_REVIEWS_PAGE_SIZE,
+          Math.max(1, peerRatingsPageSizeRef.current || DEFAULT_REVIEWS_PAGE_SIZE),
+        );
+        const requestedPage = Math.max(1, Number(page) || 1);
         const url = new URL(`/agents/${agentId}/ratings`, API_BASE_URL);
-        url.searchParams.set("user_id", String(userId));
+        url.searchParams.set("page", String(requestedPage));
+        url.searchParams.set("page_size", String(currentPageSize));
+        if (userId) {
+          url.searchParams.set("user_id", String(userId));
+        }
+
         const response = await fetch(url.toString(), {
           method: "GET",
           headers: deriveHeaders(),
           credentials: "include",
-          signal: controller.signal,
+          signal,
         });
 
         if (handleUnauthorizedResponse(response)) {
-          if (!aborted) {
+          if (shouldUpdateRatingStatus) {
             setRatingStatus({ loading: false, error: null });
+          }
+          setPeerRatingsStatus({ loading: false, error: null, appending: false });
+          if (!append) {
+            setPeerRatingsFetched(false);
           }
           return;
         }
@@ -1167,9 +1268,6 @@ export default function ChatPanel({
         }
 
         const data = await response.json();
-        if (aborted) {
-          return;
-        }
 
         const summaryNormalized = normalizeRatingSummary(data?.summary);
         setCurrentRatingSummary(summaryNormalized);
@@ -1182,30 +1280,147 @@ export default function ChatPanel({
             score: normalizedUserRating.score,
             comment: normalizedUserRating.comment ?? "",
           });
-        } else {
+        } else if (!append) {
           setRatingDraft((previous) => ({ ...previous, comment: "" }));
         }
 
-        setRatingStatus({ loading: false, error: null });
+        const normalizedList = Array.isArray(data?.ratings)
+          ? data.ratings
+              .map((item) => normalizePeerRating(item))
+              .filter((item) => item != null)
+          : [];
+
+        const userIdString =
+          typeof userId === "string" ? userId : userId != null ? String(userId) : null;
+
+        setPeerRatings((previous) => {
+          const base = append ? [...previous, ...normalizedList] : normalizedList;
+          const seen = new Set();
+          const deduped = [];
+          for (const item of base) {
+            if (!item) {
+              continue;
+            }
+            const key =
+              item.id ?? `${item.userId ?? "?"}-${item.updatedAt ?? item.createdAt ?? "?"}`;
+            if (seen.has(key)) {
+              continue;
+            }
+            seen.add(key);
+            deduped.push(item);
+          }
+          return deduped;
+        });
+
+        const totalCountRaw =
+          data?.pagination?.total ?? data?.total_count ?? summaryNormalized.rating_count ?? 0;
+        const pageSizeRaw =
+          data?.pagination?.page_size ?? data?.page_size ?? currentPageSize;
+        const pageRaw = data?.pagination?.page ?? requestedPage;
+
+        const normalizedPageSize = (() => {
+          const value = Number(pageSizeRaw);
+          if (!Number.isFinite(value) || value <= 0) {
+            return currentPageSize;
+          }
+          return Math.min(MAX_REVIEWS_PAGE_SIZE, Math.max(1, Math.floor(value)));
+        })();
+
+        peerRatingsPageSizeRef.current = normalizedPageSize;
+
+        const normalizedPage = (() => {
+          const value = Number(pageRaw);
+          if (!Number.isFinite(value) || value <= 0) {
+            return requestedPage;
+          }
+          return Math.floor(value);
+        })();
+
+        const normalizedTotal = (() => {
+          const value = Number(totalCountRaw);
+          if (!Number.isFinite(value) || value <= 0) {
+            return 0;
+          }
+          return Math.floor(value);
+        })();
+
+        setPeerRatingsPageInfo({
+          page: normalizedPage,
+          pageSize: normalizedPageSize,
+          total: normalizedTotal,
+        });
+
+        if (!append) {
+          setPeerRatingsFetched(true);
+        }
+
+        if (shouldUpdateRatingStatus) {
+          setRatingStatus({ loading: false, error: null });
+        }
+        setPeerRatingsStatus({ loading: false, error: null, appending: false });
       } catch (error) {
-        if (aborted || error?.name === "AbortError") {
+        if (error?.name === "AbortError") {
           return;
         }
         console.error(error);
-        setRatingStatus({
+        if (shouldUpdateRatingStatus) {
+          setRatingStatus({
+            loading: false,
+            error: error?.message ?? "Failed to load rating",
+          });
+        }
+        setPeerRatingsStatus({
           loading: false,
           error: error?.message ?? "Failed to load rating",
+          appending: false,
         });
+        if (!append) {
+          setPeerRatingsFetched(false);
+        }
       }
-    };
+    },
+    [agentId, userId, handleUnauthorizedResponse, notifyRatingSummaryChange],
+  );
 
-    fetchRatings();
+  useEffect(() => {
+    if (!agentId) {
+      setPeerRatings([]);
+      setPeerRatingsPageInfo({
+        page: 1,
+        pageSize: DEFAULT_REVIEWS_PAGE_SIZE,
+        total: 0,
+      });
+      setPeerRatingsFetched(false);
+      return;
+    }
+
+    setPeerRatingsFetched(false);
+    const controller = new AbortController();
+    fetchAgentRatings({ page: 1, append: false, signal: controller.signal });
 
     return () => {
-      aborted = true;
       controller.abort();
     };
-  }, [agentId, userId, handleUnauthorizedResponse, notifyRatingSummaryChange]);
+  }, [agentId, userId, fetchAgentRatings]);
+
+  useEffect(() => {
+    if (!reviewsModalOpen) {
+      return;
+    }
+    if (
+      !peerRatingsFetched &&
+      !peerRatingsStatus.loading &&
+      !peerRatingsStatus.error
+    ) {
+      fetchAgentRatings({ page: 1, append: false });
+    }
+  }, [
+    reviewsModalOpen,
+    peerRatingsFetched,
+    peerRatingsStatus.loading,
+    peerRatingsStatus.error,
+    fetchAgentRatings,
+  ]);
 
   const handleOpenRatingModal = useCallback(() => {
     if (ratingStatus.loading) {
@@ -1234,6 +1449,37 @@ export default function ChatPanel({
     setRatingModalOpen(false);
     setRatingSubmitStatus({ loading: false, error: null, success: false });
   }, [ratingSubmitStatus.loading]);
+
+  const handleOpenReviewsModal = useCallback(() => {
+    setReviewsModalOpen(true);
+  }, []);
+
+  const handleCloseReviewsModal = useCallback(() => {
+    setReviewsModalOpen(false);
+  }, []);
+
+  const handleRefreshPeerRatings = useCallback(() => {
+    if (peerRatingsStatus.loading && !peerRatingsStatus.appending) {
+      return;
+    }
+    setPeerRatingsFetched(false);
+    fetchAgentRatings({ page: 1, append: false });
+  }, [
+    fetchAgentRatings,
+    peerRatingsStatus.loading,
+    peerRatingsStatus.appending,
+  ]);
+
+  const handleLoadMorePeerRatings = useCallback(() => {
+    if (peerRatingsStatus.loading) {
+      return;
+    }
+    if (peerRatings.length >= peerRatingsPageInfo.total) {
+      return;
+    }
+    const nextPage = peerRatingsPageInfo.page + 1;
+    fetchAgentRatings({ page: nextPage, append: true });
+  }, [fetchAgentRatings, peerRatingsStatus.loading, peerRatings.length, peerRatingsPageInfo.page, peerRatingsPageInfo.total]);
 
   const handleRatingScoreChange = useCallback((value) => {
     const normalized = Math.max(1, Math.min(5, Number(value) || 5));
@@ -1335,6 +1581,15 @@ export default function ChatPanel({
       open: () => {
         handleOpenRatingModal();
       },
+      openRatingForm: () => {
+        handleOpenRatingModal();
+      },
+      openReviews: () => {
+        handleOpenReviewsModal();
+      },
+      refreshReviews: () => {
+        handleRefreshPeerRatings();
+      },
     };
     ratingControllerRef.current = controller;
     onRatingControllerChange(controller);
@@ -1342,7 +1597,7 @@ export default function ChatPanel({
       ratingControllerRef.current = null;
       onRatingControllerChange(null);
     };
-  }, [handleOpenRatingModal, onRatingControllerChange]);
+  }, [handleOpenRatingModal, handleOpenReviewsModal, handleRefreshPeerRatings, onRatingControllerChange]);
 
   const initializeConversation = useCallback(async () => {
     if (!agentId || !userId) {
@@ -2198,7 +2453,7 @@ export default function ChatPanel({
           <div>
             <h2 className="text-lg font-semibold text-gray-900">
               {isPhoneMode
-                ? `电话模式${agent?.name ? ` - ${agent.name}` : ""}`
+                ? `语音模式${agent?.name ? ` - ${agent.name}` : ""}`
                 : `Smart Chat${agent?.name ? ` - ${agent.name}` : ""}`}
             </h2>
             <p className="text-xs text-gray-500">
@@ -2260,6 +2515,14 @@ export default function ChatPanel({
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-gray-500">
+          <button
+            type="button"
+            onClick={handleOpenReviewsModal}
+            aria-busy={peerRatingsStatus.loading}
+            className="rounded-full border border-amber-200 px-4 py-2 text-xs font-medium text-amber-600 transition hover:border-amber-300 hover:text-amber-500"
+          >
+            {isInitialPeerRatingsLoading ? "加载中..." : "查看用户评价"}
+          </button>
           {showRatingButton ? (
             <button
               type="button"
@@ -2275,7 +2538,7 @@ export default function ChatPanel({
               href={`/smart/${agentId ?? ""}/phone`}
               className="rounded-full border border-blue-200 px-4 py-2 text-xs font-medium text-blue-600 transition hover:border-blue-400 hover:text-blue-500"
             >
-              电话模式
+              语音模式
             </Link>
           ) : (
             <Link
@@ -2699,6 +2962,153 @@ export default function ChatPanel({
           </form>
         )}
       </div>
+      {isMounted && reviewsModalOpen
+        ? createPortal(
+            <div className="fixed inset-0 z-[990] flex items-center justify-center bg-slate-900/60 px-4">
+              <div className="flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white p-6 shadow-2xl">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">用户评价</h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                      看看大家对这个智能体的真实反馈。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCloseReviewsModal}
+                    className="rounded-full border border-gray-200 p-1.5 text-gray-500 transition hover:border-gray-300 hover:text-gray-700"
+                    aria-label="关闭评价列表"
+                  >
+                    <span className="block h-5 w-5 text-center">×</span>
+                  </button>
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                  <AgentRatingSummary
+                    average={currentRatingSummary.average_score}
+                    count={currentRatingSummary.rating_count}
+                    size="md"
+                    className="w-fit"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleRefreshPeerRatings}
+                    disabled={peerRatingsStatus.loading && !peerRatingsStatus.appending}
+                    className="rounded-full border border-gray-200 px-4 py-2 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-800 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+                  >
+                    {peerRatingsStatus.loading && !peerRatingsStatus.appending
+                      ? "刷新中..."
+                      : "刷新"}
+                  </button>
+                </div>
+
+                {peerRatingsStatus.error ? (
+                  <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-600">
+                    {peerRatingsStatus.error}
+                  </div>
+                ) : null}
+
+                <div className="mt-4 flex-1 overflow-y-auto pr-1">
+                  {isInitialPeerRatingsLoading ? (
+                    <div className="py-10 text-center text-sm text-gray-500">加载中...</div>
+                  ) : peerRatings.length === 0 ? (
+                    <div className="py-10 text-center text-sm text-gray-500">
+                      暂时还没有其他用户的评价。
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-4">
+                      {peerRatings.map((item) => {
+                        const avatarSrc = item?.userAvatarUrl
+                          ? resolveAssetUrl(item.userAvatarUrl)
+                          : "";
+                        const displayName = item?.userDisplayName ?? "匿名用户";
+                        const timestamp = formatTimestamp(
+                          item?.updatedAt ?? item?.createdAt,
+                        );
+                        return (
+                          <div
+                            key={item.id}
+                            className="rounded-2xl border border-gray-100 bg-white px-4 py-3 shadow-sm"
+                          >
+                            <div className="flex items-start gap-3">
+                              {avatarSrc ? (
+                                <img
+                                  src={avatarSrc}
+                                  alt={`${displayName} 头像`}
+                                  className="h-10 w-10 rounded-full object-cover"
+                                />
+                              ) : (
+                                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-amber-100 text-sm font-medium text-amber-600">
+                                  {displayName.slice(0, 1)}
+                                </span>
+                              )}
+                              <div className="flex-1">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-900">
+                                      {displayName}
+                                    </span>
+                                    <div className="flex items-center gap-1">
+                                      {[1, 2, 3, 4, 5].map((value) => (
+                                        <svg
+                                          key={value}
+                                          viewBox="0 0 24 24"
+                                          className={`h-4 w-4 ${
+                                            value <= (item?.score ?? 0)
+                                              ? "text-amber-500"
+                                              : "text-gray-200"
+                                          }`}
+                                          fill="currentColor"
+                                          aria-hidden
+                                        >
+                                          <path d="M12 2.5l2.89 6.02 6.67.55-5.04 4.46 1.5 6.47L12 16.96l-6.02 3.04 1.5-6.47-5.04-4.46 6.67-.55L12 2.5z" />
+                                        </svg>
+                                      ))}
+                                      <span className="text-xs font-medium text-amber-600">
+                                        {item?.score ?? 0}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <span className="text-xs text-gray-400">
+                                    {timestamp || "刚刚"}
+                                  </span>
+                                </div>
+                                <p className="mt-2 whitespace-pre-line text-sm text-gray-600">
+                                  {item?.comment && item.comment.trim()
+                                    ? item.comment.trim()
+                                    : "该用户未留下文字评价。"}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-xs text-gray-400">
+                    已显示 {peerRatings.length} 条 / 共 {peerRatingsPageInfo.total} 条
+                  </span>
+                  {hasMorePeerRatings ? (
+                    <button
+                      type="button"
+                      onClick={handleLoadMorePeerRatings}
+                      disabled={peerRatingsStatus.loading}
+                      className="rounded-full border border-gray-200 px-4 py-2 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-800 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+                    >
+                      {peerRatingsStatus.loading && peerRatingsStatus.appending
+                        ? "加载中..."
+                        : "加载更多"}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
       {isMounted && ratingModalOpen
         ? createPortal(
             <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-slate-900/60 px-4">

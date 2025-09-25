@@ -9,6 +9,17 @@ import { resolveAssetUrl } from "@/lib/media";
 
 const API_BASE_URL = getApiBaseUrl();
 const PAGE_SIZE = 6;
+const SORT_OPTIONS = [
+  { value: "hot", label: "热门优先" },
+  { value: "updated", label: "按更新时间" },
+  { value: "created", label: "按创建时间" },
+  { value: "views", label: "按浏览次数" },
+];
+
+const DIRECTION_OPTIONS = [
+  { value: "desc", label: "倒序" },
+  { value: "asc", label: "正序" },
+];
 
 function pickStoredToken() {
   if (typeof window === "undefined") {
@@ -53,11 +64,16 @@ export default function AgentDirectoryPage() {
   const [agents, setAgents] = useState([]);
   const [status, setStatus] = useState({ loading: false, error: null });
   const [page, setPage] = useState(1);
+  const [sortOrder, setSortOrder] = useState("hot");
 
+  const [sortDirection, setSortDirection] = useState("desc");
   const loadAgents = useCallback(async () => {
     setStatus({ loading: true, error: null });
     try {
-      const response = await fetch(`${API_BASE_URL}/agents`, {
+      const url = new URL(`${API_BASE_URL}/agents`);
+      url.searchParams.set("sort", sortOrder);
+      url.searchParams.set("direction", sortDirection);
+      const response = await fetch(url.toString(), {
         method: "GET",
         headers: deriveHeaders(),
         credentials: "include",
@@ -78,11 +94,21 @@ export default function AgentDirectoryPage() {
         error: error?.message ?? "Failed to load agents",
       });
     }
-  }, []);
+  }, [sortOrder, sortDirection]);
 
   useEffect(() => {
     loadAgents();
   }, [loadAgents]);
+
+  const handleSortChange = useCallback((event) => {
+    const value = event?.target?.value ?? "hot";
+    setSortOrder(value);
+  }, []);
+
+  const handleDirectionChange = useCallback((event) => {
+    const value = event?.target?.value ?? "desc";
+    setSortDirection(value);
+  }, []);
 
   const totalPages = useMemo(() => {
     if (!agents.length) {
@@ -117,7 +143,37 @@ export default function AgentDirectoryPage() {
               使用本页面分页浏览所有已创建的智能体，提供头像预留位，方便后续为每位智能体上传专属形象。
             </p>
           </div>
-          <div className="flex items-center gap-3 self-start">
+          <div className="flex flex-wrap items-center gap-3 self-start">
+            <label className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-500 shadow-sm">
+              <span className="text-slate-400">排序字段</span>
+              <select
+                value={sortOrder}
+                onChange={handleSortChange}
+                disabled={status.loading}
+                className="bg-transparent text-sm font-medium text-slate-700 focus:outline-none"
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-500 shadow-sm">
+              <span className="text-slate-400">排序方向</span>
+              <select
+                value={sortDirection}
+                onChange={handleDirectionChange}
+                disabled={status.loading}
+                className="bg-transparent text-sm font-medium text-slate-700 focus:outline-none"
+              >
+                {DIRECTION_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               type="button"
               onClick={loadAgents}
@@ -166,15 +222,25 @@ export default function AgentDirectoryPage() {
           <div className="mt-10 grid gap-6 md:grid-cols-2 xl:grid-cols-3">
             {pagedAgents.map((agent) => {
               const agentId = agent?.id ?? agent?.ID;
-              const intro = agent?.one_sentence_intro ?? agent?.oneSentenceIntro ?? "";
+              const intro =
+                agent?.one_sentence_intro ?? agent?.oneSentenceIntro ?? "";
               const description =
-                typeof intro === "string" && intro.trim() ? intro.trim() : "暂无简介";
+                typeof intro === "string" && intro.trim()
+                  ? intro.trim()
+                  : "暂无简介";
               const averageRating = Number(
                 agent?.average_rating ?? agent?.averageRating ?? 0,
               );
               const ratingCount = Number(
                 agent?.rating_count ?? agent?.ratingCount ?? 0,
               );
+              const viewCountRaw = Number(
+                agent?.view_count ?? agent?.viewCount ?? 0,
+              );
+              const viewCount = Number.isFinite(viewCountRaw)
+                ? Math.max(0, Math.floor(viewCountRaw))
+                : 0;
+              const viewCountDisplay = viewCount.toLocaleString("zh-CN");
               let tags = [];
               try {
                 if (Array.isArray(agent?.tags)) {
@@ -236,6 +302,10 @@ export default function AgentDirectoryPage() {
                       size="sm"
                       className="mt-3 w-fit"
                     />
+
+                    <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-400">
+                      <span title="Total views">Views: {viewCountDisplay}</span>
+                    </div>
 
                     {description ? (
                       <p className="mt-3 text-sm text-slate-600">

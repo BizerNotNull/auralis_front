@@ -23,6 +23,13 @@ const STATUS_FILTER_OPTIONS = [
   { value: "all", label: "All" },
 ];
 
+const SORT_OPTIONS = [
+  { value: "hot", label: "Hot" },
+  { value: "views", label: "Views" },
+  { value: "rating", label: "Rating" },
+  { value: "latest", label: "Latest" },
+];
+
 const ADMIN_STATUS_OPTIONS = [
   { value: "pending", label: "Pending" },
   { value: "active", label: "Active" },
@@ -59,7 +66,6 @@ function statusBadgeClasses(status) {
       return "border-slate-200 bg-slate-100 text-slate-500";
   }
 }
-
 
 function pickStoredToken() {
   if (typeof window === "undefined") {
@@ -116,6 +122,7 @@ export default function AdminAgentsPage() {
     error: null,
   });
   const [statusFilter, setStatusFilter] = useState("pending");
+  const [sortOrder, setSortOrder] = useState("hot");
   const [selectedAgentId, setSelectedAgentId] = useState(null);
   const [agentDetail, setAgentDetail] = useState(null);
   const [agentDetailStatus, setAgentDetailStatus] = useState({
@@ -177,13 +184,17 @@ export default function AdminAgentsPage() {
     }
   }, []);
 
-const loadAgents = useCallback(async () => {
+  const loadAgents = useCallback(async () => {
     setAgentsStatus({ loading: true, error: null });
     try {
-      const query =
-        statusFilter && statusFilter !== "all"
-          ? `?status=${encodeURIComponent(statusFilter)}`
-          : "";
+      const params = new URLSearchParams();
+      if (statusFilter && statusFilter !== "all") {
+        params.set("status", statusFilter);
+      }
+      if (sortOrder) {
+        params.set("sort", sortOrder);
+      }
+      const query = params.toString() ? `?${params.toString()}` : "";
       const response = await fetch(`${API_BASE_URL}/admin/agents${query}`, {
         method: "GET",
         headers: deriveHeaders(),
@@ -223,7 +234,7 @@ const loadAgents = useCallback(async () => {
         error: error?.message ?? "Failed to load agents",
       });
     }
-  }, [statusFilter]);
+  }, [statusFilter, sortOrder]);
 
   useEffect(() => {
     loadProfile();
@@ -418,7 +429,8 @@ const loadAgents = useCallback(async () => {
 
     setFormValues({
       name: detail?.name ?? "",
-      one_sentence_intro: detail?.one_sentence_intro ?? detail?.oneSentenceIntro ?? "",
+      one_sentence_intro:
+        detail?.one_sentence_intro ?? detail?.oneSentenceIntro ?? "",
       persona_desc: detail?.persona_desc ?? "",
       opening_line: detail?.opening_line ?? "",
       first_turn_hint: detail?.first_turn_hint ?? "",
@@ -477,6 +489,13 @@ const loadAgents = useCallback(async () => {
     setAgentDetail(null);
   };
 
+  const handleSortOrderChange = (event) => {
+    const value = event.target.value;
+    setSortOrder(value);
+    setSelectedAgentId(null);
+    setAgentDetail(null);
+  };
+
   const handleAvatarChange = (event) => {
     const file = event.target?.files?.[0];
     if (file) {
@@ -502,7 +521,10 @@ const loadAgents = useCallback(async () => {
     try {
       const formData = new FormData();
       formData.append("name", formValues.name.trim());
-      formData.append("one_sentence_intro", (formValues.one_sentence_intro ?? "").trim());
+      formData.append(
+        "one_sentence_intro",
+        (formValues.one_sentence_intro ?? "").trim(),
+      );
       formData.append("persona_desc", (formValues.persona_desc ?? "").trim());
       formData.append("opening_line", (formValues.opening_line ?? "").trim());
       formData.append(
@@ -574,7 +596,9 @@ const loadAgents = useCallback(async () => {
           setAgents((prev) =>
             prev.map((item) => {
               const itemId = item?.id ?? item?.ID ?? null;
-              return itemId != null && String(itemId) === String(updatedId) ? updatedAgent : item;
+              return itemId != null && String(itemId) === String(updatedId)
+                ? updatedAgent
+                : item;
             }),
           );
         }
@@ -662,6 +686,23 @@ const loadAgents = useCallback(async () => {
                   ))}
                 </select>
               </div>
+              <div className="flex flex-col gap-2">
+                <label className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                  Sort by
+                </label>
+                <select
+                  value={sortOrder}
+                  onChange={handleSortOrderChange}
+                  disabled={agentsStatus.loading}
+                  className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:text-slate-300"
+                >
+                  {SORT_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               {agentsStatus.error ? (
                 <p className="rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-500">
                   {agentsStatus.error}
@@ -671,7 +712,8 @@ const loadAgents = useCallback(async () => {
                 {agents.map((agent) => {
                   const rawId = agent?.id ?? agent?.ID;
                   const agentId = rawId != null ? String(rawId) : "";
-                  const activeId = selectedAgentId != null ? String(selectedAgentId) : "";
+                  const activeId =
+                    selectedAgentId != null ? String(selectedAgentId) : "";
                   const avatarUrl = resolveAssetUrl(
                     agent?.avatar_url ?? agent?.avatarUrl ?? "",
                   );
@@ -681,6 +723,13 @@ const loadAgents = useCallback(async () => {
                   const status = agent?.status ?? "";
                   const statusLabel = formatStatusLabel(status);
                   const statusClasses = statusBadgeClasses(status);
+                  const viewCountRaw = Number(
+                    agent?.view_count ?? agent?.viewCount ?? 0,
+                  );
+                  const viewCount = Number.isFinite(viewCountRaw)
+                    ? Math.max(0, Math.floor(viewCountRaw))
+                    : 0;
+                  const viewCountLabel = viewCount.toLocaleString("en-US");
                   return (
                     <li key={agentId || Math.random()}>
                       <button
@@ -706,7 +755,12 @@ const loadAgents = useCallback(async () => {
                           )}
                           <div className="flex flex-col">
                             <span className="font-medium">{name}</span>
-                            <span className="text-[11px] text-slate-400">ID: {agentId || "--"}</span>
+                            <span className="text-[11px] text-slate-400">
+                              ID: {agentId || "--"}
+                            </span>
+                            <span className="text-[11px] text-slate-400">
+                              Views {viewCountLabel}
+                            </span>
                           </div>
                         </div>
                         <span
@@ -746,13 +800,14 @@ const loadAgents = useCallback(async () => {
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <span
                           className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClasses(
-                            agentDetail.agent.status ?? ""
+                            agentDetail.agent.status ?? "",
                           )}`}
                         >
                           {formatStatusLabel(agentDetail.agent.status ?? "")}
                         </span>
                         <span className="text-[11px] text-slate-400">
-                          ID: {agentDetail.agent.id ?? agentDetail.agent.ID ?? "--"}
+                          ID:{" "}
+                          {agentDetail.agent.id ?? agentDetail.agent.ID ?? "--"}
                         </span>
                       </div>
                       <p className="mt-1 text-xs text-slate-400">

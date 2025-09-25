@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { persistToken } from "@/lib/auth/client";
@@ -58,7 +59,7 @@ async function extractServerMessage(response) {
 export default function LoginPage() {
   const router = useRouter();
   const [values, setValues] = useState({ username: "", password: "" });
-  const [captcha, setCaptcha] = useState({ id: "", question: "", expiresAt: "", loading: false });
+  const [captcha, setCaptcha] = useState({ id: "", image: "", expiresAt: "", loading: false });
   const [captchaAnswer, setCaptchaAnswer] = useState("");
   const [captchaError, setCaptchaError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -80,16 +81,17 @@ export default function LoginPage() {
 
       const data = await response.json();
       const id = data?.captcha_id ?? "";
-      const question = data?.question ?? "";
+      const rawImage = typeof data?.image_base64 === "string" ? data.image_base64.trim() : "";
+      const image = rawImage && !rawImage.startsWith("data:") ? `data:image/png;base64,${rawImage}` : rawImage;
       const expiresAt = data?.expires_at ?? "";
-      if (!id || !question) {
+      if (!id || !image) {
         throw new Error("获取验证码失败");
       }
 
-      setCaptcha({ id, question, expiresAt, loading: false });
+      setCaptcha({ id, image, expiresAt, loading: false });
       setCaptchaAnswer("");
     } catch (caught) {
-      setCaptcha({ id: "", question: "", expiresAt: "", loading: false });
+      setCaptcha({ id: "", image: "", expiresAt: "", loading: false });
       setCaptchaAnswer("");
       setCaptchaError(caught?.message ?? "验证码刷新失败");
     }
@@ -225,8 +227,31 @@ export default function LoginPage() {
                 value={captchaAnswer}
                 onChange={handleCaptchaChange}
                 className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                placeholder="请回答验证码"
+                placeholder="请输入验证码"
               />
+              <button
+                type="button"
+                onClick={loadCaptcha}
+                disabled={captcha.loading || submitting}
+                className="flex h-12 w-28 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:border-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
+                aria-label="刷新验证码"
+              >
+                {captcha.image ? (
+                  <Image
+                    src={captcha.image}
+                    alt="验证码"
+                    width={160}
+                    height={60}
+                    className="h-full w-full object-cover"
+                    loading="lazy"
+                    unoptimized
+                  />
+                ) : (
+                  <span className="text-xs text-slate-400">
+                    {captcha.loading ? "加载中..." : "待刷新"}
+                  </span>
+                )}
+              </button>
               <button
                 type="button"
                 onClick={loadCaptcha}
@@ -237,7 +262,7 @@ export default function LoginPage() {
               </button>
             </div>
             <p className="text-xs text-slate-500">
-              {captcha.question ? `请计算：${captcha.question}` : "请点击刷新获取验证码"}
+              {captcha.image ? "请输入图片中的字符，无法识别可刷新" : "请点击刷新获取验证码"}
             </p>
             {captchaError ? (
               <p className="text-xs text-red-500">{captchaError}</p>
