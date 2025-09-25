@@ -1,4 +1,4 @@
-/* eslint-disable @next/next/no-img-element */
+﻿/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -2454,13 +2454,14 @@ export default function ChatPanel({
             <h2 className="text-lg font-semibold text-gray-900">
               {isPhoneMode
                 ? `语音模式${agent?.name ? ` - ${agent.name}` : ""}`
-                : `Smart Chat${agent?.name ? ` - ${agent.name}` : ""}`}
+                : `${agent?.name ? `  ${agent.name}` : ""}`}
             </h2>
-            <p className="text-xs text-gray-500">
+            
+            {/* <p className="text-xs text-gray-500">
               {isPhoneMode
                 ? "通过语音实时与智能体通话，Live2D 会同步表现情绪。"
                 : "Browse historical messages and craft new prompts with text or voice."}
-            </p>
+            </p> */}
             <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-gray-400">
               <span>
                 Live2D:{" "}
@@ -2506,33 +2507,9 @@ export default function ChatPanel({
                 </>
               ) : null}
             </div>
-            <AgentRatingSummary
-              average={currentRatingSummary.average_score}
-              count={currentRatingSummary.rating_count}
-              size="sm"
-              className="mt-3 w-fit"
-            />
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-gray-500">
-          <button
-            type="button"
-            onClick={handleOpenReviewsModal}
-            aria-busy={peerRatingsStatus.loading}
-            className="rounded-full border border-amber-200 px-4 py-2 text-xs font-medium text-amber-600 transition hover:border-amber-300 hover:text-amber-500"
-          >
-            {isInitialPeerRatingsLoading ? "加载中..." : "查看用户评价"}
-          </button>
-          {showRatingButton ? (
-            <button
-              type="button"
-              onClick={handleOpenRatingModal}
-              disabled={!userId || ratingStatus.loading}
-              className="rounded-full border border-amber-200 px-4 py-2 text-xs font-medium text-amber-600 transition hover:border-amber-300 hover:text-amber-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
-            >
-              {userRating ? "修改评分" : "评价智能体"}
-            </button>
-          ) : null}
           {!isPhoneMode ? (
             <Link
               href={`/smart/${agentId ?? ""}/phone`}
@@ -2554,44 +2531,46 @@ export default function ChatPanel({
           ) : null}
         </div>
       </header>
-
-      {ratingStatus.error ? (
-        <div className="mx-4 mt-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-600">
-          {ratingStatus.error}
-        </div>
-      ) : null}
-      {ratingSubmitStatus.success ? (
-        <div className="mx-4 mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-600">
-          已更新智能体评分，感谢反馈！
-        </div>
-      ) : null}
-
       {voiceStatus.enabled ? (
-        <div className="border-b border-white/40 bg-white/70 px-4 py-3 text-xs text-gray-600">
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-wrap items-center gap-3">
+        <div className="border-t border-white/40 bg-white/80">
+          <div className="space-y-3 px-4 pb-4">
+            <div className="flex flex-wrap items-center gap-4">
               <label className="flex items-center gap-2">
-                <span className="text-gray-500">语音</span>
+                <span className="text-gray-500">音色</span>
                 <select
                   className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs focus:border-blue-400 focus:outline-none"
-                  value={selectedVoice}
+                  value={selectedVoice || ""}
                   onChange={(event) => {
-                    setSelectedVoice(event.target.value);
+                    const nextVoice = event.target.value;
                     userSelectedVoiceRef.current = true;
+                    setSelectedVoice(nextVoice);
+                    setSpeechError(null);
                   }}
+                  disabled={voiceStatus.loading || voiceOptions.length === 0}
                 >
                   {voiceOptions.length === 0 ? (
-                    <option value="">暂无可用语音</option>
+                    <option value="">暂无可用音色</option>
                   ) : (
-                    voiceOptions.map((voice) => (
-                      <option key={voice.id} value={voice.id}>
-                        {voice.name ?? voice.id}
-                      </option>
-                    ))
+                    voiceOptions.map((option) => {
+                      const value = option?.id;
+                      if (value == null) {
+                        return null;
+                      }
+                      const label =
+                        option?.display_name ??
+                        option?.displayName ??
+                        option?.name ??
+                        option?.nickname ??
+                        String(value);
+                      return (
+                        <option key={String(value)} value={String(value)}>
+                          {label}
+                        </option>
+                      );
+                    })
                   )}
                 </select>
               </label>
-
               <label className="flex items-center gap-2">
                 <span className="text-gray-500">情绪</span>
                 <select
@@ -2785,19 +2764,19 @@ export default function ChatPanel({
                       {!isUser && speech ? (
                         <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
                           <button
-                            type="button"
                             onClick={() => handleReplaySpeech(message)}
                             className="flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-500"
+                            type="button"
                           >
                             ▶ 重播语音
                           </button>
                           {isSpeaking ? (
                             <button
-                              type="button"
                               onClick={stopSpeechPlayback}
-                              className="flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-[11px] text-gray-600 transition hover:border-red-400 hover:text-red-500"
+                              className="flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-[11px] text-gray-600 transition hover-border-red-400 hover:text-red-500"
+                              type="button"
                             >
-                              ⏹ 停止播报
+                              ■ 停止播放
                             </button>
                           ) : null}
                           {speech?.voice_id ? (
@@ -2813,12 +2792,11 @@ export default function ChatPanel({
                             </span>
                           ) : null}
                           {speech?.provider ? (
-                            <span>引擎: {speech.provider}</span>
+                            <span>来源: {speech.provider}</span>
                           ) : null}
                         </div>
                       ) : null}
-                    </div>
-                    {isUser ? (
+
                       <div className="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-blue-500 text-xs font-medium text-white shadow">
                         You
                       </div>
@@ -2835,14 +2813,12 @@ export default function ChatPanel({
             <div className="flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-2">
                 <button
-                  type="button"
                   onClick={phoneCallActive ? stopPhoneCall : startPhoneCall}
                   className={`rounded-full px-5 py-2 text-sm font-medium text-white shadow transition ${phoneCallActive ? "bg-red-500 hover:bg-red-600" : "bg-blue-500 hover:bg-blue-600"}`}
                 >
                   {phoneCallActive ? "挂断" : "开始通话"}
                 </button>
                 <button
-                  type="button"
                   onClick={handleVoiceToggle}
                   disabled={!voiceSupported || !phoneCallActive || isSending}
                   className="flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -2862,7 +2838,6 @@ export default function ChatPanel({
                   />
                 </button>
                 <button
-                  type="button"
                   onClick={loadMessages}
                   disabled={messagesStatus.loading}
                   className="rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -2870,7 +2845,6 @@ export default function ChatPanel({
                   刷新记录
                 </button>
                 <button
-                  type="button"
                   onClick={handleClearConversation}
                   disabled={clearStatus.loading || !userId}
                   className="rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-red-400 hover:text-red-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -2914,7 +2888,6 @@ export default function ChatPanel({
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    type="button"
                     onClick={handleVoiceToggle}
                     disabled={!voiceSupported || !userId || isSending}
                     className="flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -2934,7 +2907,6 @@ export default function ChatPanel({
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    type="button"
                     onClick={handleClearConversation}
                     disabled={clearStatus.loading || !userId}
                     className="rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-red-400 hover:text-red-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -2942,7 +2914,6 @@ export default function ChatPanel({
                     {clearStatus.loading ? "Clearing..." : "Clear chat"}
                   </button>
                   <button
-                    type="button"
                     onClick={loadMessages}
                     disabled={messagesStatus.loading}
                     className="rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -2974,7 +2945,6 @@ export default function ChatPanel({
                     </p>
                   </div>
                   <button
-                    type="button"
                     onClick={handleCloseReviewsModal}
                     className="rounded-full border border-gray-200 p-1.5 text-gray-500 transition hover:border-gray-300 hover:text-gray-700"
                     aria-label="关闭评价列表"
@@ -2991,7 +2961,6 @@ export default function ChatPanel({
                     className="w-fit"
                   />
                   <button
-                    type="button"
                     onClick={handleRefreshPeerRatings}
                     disabled={peerRatingsStatus.loading && !peerRatingsStatus.appending}
                     className="rounded-full border border-gray-200 px-4 py-2 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-800 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -3093,7 +3062,6 @@ export default function ChatPanel({
                   </span>
                   {hasMorePeerRatings ? (
                     <button
-                      type="button"
                       onClick={handleLoadMorePeerRatings}
                       disabled={peerRatingsStatus.loading}
                       className="rounded-full border border-gray-200 px-4 py-2 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-800 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -3123,7 +3091,6 @@ export default function ChatPanel({
                     </p>
                   </div>
                   <button
-                    type="button"
                     onClick={handleCloseRatingModal}
                     className="rounded-full border border-gray-200 p-1.5 text-gray-500 transition hover:border-gray-300 hover:text-gray-700"
                     aria-label="关闭评分弹窗"
@@ -3147,7 +3114,6 @@ export default function ChatPanel({
                         return (
                           <button
                             key={value}
-                            type="button"
                             onClick={() => handleRatingScoreChange(value)}
                             className={`flex h-10 w-10 items-center justify-center rounded-full border transition ${
                               active
@@ -3202,7 +3168,6 @@ export default function ChatPanel({
 
                   <div className="flex justify-end gap-3">
                     <button
-                      type="button"
                       onClick={handleCloseRatingModal}
                       className="rounded-full border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-800"
                       disabled={ratingSubmitStatus.loading}
@@ -3210,7 +3175,6 @@ export default function ChatPanel({
                       取消
                     </button>
                     <button
-                      type="button"
                       onClick={handleSubmitRating}
                       disabled={ratingSubmitStatus.loading || !userId}
                       className="rounded-full bg-amber-500 px-5 py-2 text-sm font-semibold text-white shadow transition hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-amber-300"
@@ -3227,3 +3191,5 @@ export default function ChatPanel({
     </section>
   );
 }
+
+
