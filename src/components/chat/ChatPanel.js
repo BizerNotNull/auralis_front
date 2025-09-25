@@ -2797,10 +2797,12 @@ export default function ChatPanel({
                         </div>
                       ) : null}
 
-                      <div className="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-blue-500 text-xs font-medium text-white shadow">
-                        You
-                      </div>
-                    ) : null}
+                      {isUser ? (
+                        <div className="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-blue-500 text-xs font-medium text-white shadow">
+                          You
+                        </div>
+                      ) : null}
+                    </div>
                   </li>
                 );
               })}
