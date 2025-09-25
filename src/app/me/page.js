@@ -8,6 +8,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const API_BASE_URL = "/api/auth";
 const TOKEN_STORAGE_KEYS = ["access_token", "token", "authToken", "jwt"];
 
+const ROLE_LABELS = {
+  admin: "\u7BA1\u7406\u5458",
+  staff: "\u56E2\u961F\u6210\u5458",
+  user: "\u666E\u901A\u7528\u6237",
+};
+
+
 function pickStoredToken() {
   if (typeof window === "undefined") {
     return null;
@@ -407,6 +414,39 @@ export default function ProfilePage() {
     return name.slice(0, 1).toUpperCase();
   }, [primaryDisplayName]);
 
+  const roleBadges = useMemo(() => {
+    if (!Array.isArray(profile?.roles)) {
+      return [];
+    }
+
+    const labels = [];
+    const seen = new Set();
+
+    for (const role of profile.roles) {
+      if (typeof role !== "string") {
+        continue;
+      }
+      const normalized = role.trim();
+      if (!normalized) {
+        continue;
+      }
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      const pretty = normalized
+        .split(/[_\s-]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+      const label = (ROLE_LABELS[key] ?? pretty) || normalized;
+      labels.push(label);
+    }
+
+    return labels;
+  }, [profile?.roles]);
+
   const isAdmin = useMemo(() => {
     return Array.isArray(profile?.roles) && profile.roles.some((role) => typeof role === "string" && role.toLowerCase() === "admin");
   }, [profile?.roles]);
@@ -486,9 +526,22 @@ export default function ProfilePage() {
                   <span>用户名：{accountUsername}</span>
                   <span>电子邮箱：{accountEmail}</span>
                 </div>
-                <p className="text-sm text-slate-500">
-                  {profile?.roles?.length ? profile.roles.join(" / ") : "普通用户"}
-                </p>
+
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {roleBadges.length > 0 ? (
+                    roleBadges.map((role) => (
+                      <span
+                        key={role}
+                        className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-600"
+                      >
+                        {role}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-sm text-slate-500">{ROLE_LABELS.user}</span>
+                  )}
+                </div>
+
                 <p className="text-xs text-slate-400">
                   加入时间：{profile?.created_at ?? profile?.createdAt ?? "--"}
                 </p>

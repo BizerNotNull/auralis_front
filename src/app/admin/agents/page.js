@@ -165,7 +165,7 @@ export default function AdminAgentsPage() {
         throw new Error(`profile request failed with ${response.status}`);
       }
       const data = await response.json();
-      setProfile(data);
+      setProfile(data?.user ?? null);
       setProfileStatus({ loading: false, error: null });
     } catch (error) {
       console.error(error);
