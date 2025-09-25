@@ -2,12 +2,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
+import AgentRatingSummary from "@/components/AgentRatingSummary";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+const API_BASE_URL = getApiBaseUrl();
 
 function pickStoredToken() {
   if (typeof window === "undefined") {
@@ -85,6 +87,56 @@ function parseExtras(rawExtras) {
     }
   }
   return null;
+}
+
+const DEFAULT_RATING_SUMMARY = {
+  average_score: 0,
+  rating_count: 0,
+};
+
+function normalizeRatingSummary(summary) {
+  if (!summary || typeof summary !== "object") {
+    return { ...DEFAULT_RATING_SUMMARY };
+  }
+  const avgValue = Number(
+    summary.average_score ?? summary.averageScore ?? summary.average ?? 0,
+  );
+  const countValue = Number(
+    summary.rating_count ?? summary.ratingCount ?? summary.count ?? 0,
+  );
+  const safeAverage = Number.isFinite(avgValue)
+    ? Math.round(avgValue * 10) / 10
+    : 0;
+  const safeCount =
+    Number.isFinite(countValue) && countValue > 0 ? Math.floor(countValue) : 0;
+  return {
+    average_score: safeAverage,
+    rating_count: safeCount,
+  };
+}
+
+function normalizeUserRating(rating) {
+  if (!rating || typeof rating !== "object") {
+    return null;
+  }
+  const scoreValue = Number(rating.score ?? rating.Score ?? rating.rating ?? 0);
+  if (!Number.isFinite(scoreValue) || scoreValue <= 0) {
+    return null;
+  }
+  const clampedScore = Math.max(1, Math.min(5, Math.round(scoreValue)));
+  const commentValue = (() => {
+    const raw = rating.comment ?? rating.Comment ?? "";
+    if (typeof raw !== "string") {
+      return "";
+    }
+    return raw.trim();
+  })();
+  return {
+    id: rating.id ?? rating.ID ?? null,
+    score: clampedScore,
+    comment: commentValue,
+    updated_at: rating.updated_at ?? rating.updatedAt ?? null,
+  };
 }
 
 const EMOTION_DISPLAY_LABELS = {
@@ -254,6 +306,10 @@ export default function ChatPanel({
   live2DStatus,
   live2DError,
   mode = "chat",
+  ratingSummary = DEFAULT_RATING_SUMMARY,
+  onRatingSummaryChange,
+  showRatingButton = true,
+  onRatingControllerChange,
 }) {
   const [userId, setUserId] = useState(null);
   const [conversationId, setConversationId] = useState(null);
@@ -270,20 +326,50 @@ export default function ChatPanel({
     loading: false,
     error: null,
   });
+  const [inputValue, setInputValue] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState(null);
+  const [currentRatingSummary, setCurrentRatingSummary] = useState(() =>
+    normalizeRatingSummary(ratingSummary),
+  );
+  const [userRating, setUserRating] = useState(null);
+  const [ratingStatus, setRatingStatus] = useState({
+    loading: false,
+    error: null,
+  });
+  const [ratingModalOpen, setRatingModalOpen] = useState(false);
+  const [ratingDraft, setRatingDraft] = useState({ score: 5, comment: "" });
+  const [ratingSubmitStatus, setRatingSubmitStatus] = useState({
+    loading: false,
+    error: null,
+    success: false,
+  });
+  const [isMounted, setIsMounted] = useState(false);
+  const ratingControllerRef = useRef(null);
+  const recognitionRef = useRef(null);
+
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
 
-  useEffect(() => () => {
-    speechRefreshTimersRef.current.forEach((timerId) => {
-      window.clearTimeout(timerId);
-    });
-    speechRefreshTimersRef.current.clear();
+  useEffect(() => {
+    setCurrentRatingSummary(normalizeRatingSummary(ratingSummary));
+  }, [ratingSummary]);
+
+  useEffect(() => {
+    setIsMounted(true);
+    return () => setIsMounted(false);
   }, []);
-  const [inputValue, setInputValue] = useState("");
-  const [isSending, setIsSending] = useState(false);
-  const [sendError, setSendError] = useState(null);
-  const recognitionRef = useRef(null);
+
+  useEffect(
+    () => () => {
+      speechRefreshTimersRef.current.forEach((timerId) => {
+        window.clearTimeout(timerId);
+      });
+      speechRefreshTimersRef.current.clear();
+    },
+    [],
+  );
   const isListeningRef = useRef(false);
   const [isListening, setIsListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
@@ -294,6 +380,14 @@ export default function ChatPanel({
   });
 
   const router = useRouter();
+  const notifyRatingSummaryChange = useCallback(
+    (summary) => {
+      if (typeof onRatingSummaryChange === "function") {
+        onRatingSummaryChange(summary);
+      }
+    },
+    [onRatingSummaryChange],
+  );
 
   const [voiceStatus, setVoiceStatus] = useState({
     loading: false,
@@ -1022,13 +1116,10 @@ export default function ChatPanel({
         throw new Error(`Profile request failed with ${response.status}`);
       }
       const data = await response.json();
-      const user = data && typeof data === "object" ? data.user ?? data : null;
+      const user =
+        data && typeof data === "object" ? (data.user ?? data) : null;
       const identifier =
-        user?.id ??
-        user?.ID ??
-        user?.user_id ??
-        user?.userId ??
-        null;
+        user?.id ?? user?.ID ?? user?.user_id ?? user?.userId ?? null;
 
       if (typeof identifier !== "number" && typeof identifier !== "string") {
         throw new Error("Profile response missing id");
@@ -1044,6 +1135,214 @@ export default function ChatPanel({
       });
     }
   }, [agentId, handleUnauthorizedResponse]);
+
+  useEffect(() => {
+    if (!agentId || !userId) {
+      return;
+    }
+    let aborted = false;
+    const controller = new AbortController();
+
+    const fetchRatings = async () => {
+      setRatingStatus({ loading: true, error: null });
+      try {
+        const url = new URL(`/agents/${agentId}/ratings`, API_BASE_URL);
+        url.searchParams.set("user_id", String(userId));
+        const response = await fetch(url.toString(), {
+          method: "GET",
+          headers: deriveHeaders(),
+          credentials: "include",
+          signal: controller.signal,
+        });
+
+        if (handleUnauthorizedResponse(response)) {
+          if (!aborted) {
+            setRatingStatus({ loading: false, error: null });
+          }
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`Rating fetch failed with ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (aborted) {
+          return;
+        }
+
+        const summaryNormalized = normalizeRatingSummary(data?.summary);
+        setCurrentRatingSummary(summaryNormalized);
+        notifyRatingSummaryChange(summaryNormalized);
+
+        const normalizedUserRating = normalizeUserRating(data?.user_rating);
+        setUserRating(normalizedUserRating);
+        if (normalizedUserRating) {
+          setRatingDraft({
+            score: normalizedUserRating.score,
+            comment: normalizedUserRating.comment ?? "",
+          });
+        } else {
+          setRatingDraft((previous) => ({ ...previous, comment: "" }));
+        }
+
+        setRatingStatus({ loading: false, error: null });
+      } catch (error) {
+        if (aborted || error?.name === "AbortError") {
+          return;
+        }
+        console.error(error);
+        setRatingStatus({
+          loading: false,
+          error: error?.message ?? "Failed to load rating",
+        });
+      }
+    };
+
+    fetchRatings();
+
+    return () => {
+      aborted = true;
+      controller.abort();
+    };
+  }, [agentId, userId, handleUnauthorizedResponse, notifyRatingSummaryChange]);
+
+  const handleOpenRatingModal = useCallback(() => {
+    if (ratingStatus.loading) {
+      return;
+    }
+    if (userRating) {
+      setRatingDraft({
+        score: userRating.score,
+        comment: userRating.comment ?? "",
+      });
+    } else {
+      setRatingDraft((previous) => ({
+        ...previous,
+        score: Math.max(1, Math.min(5, previous.score || 5)),
+        comment: "",
+      }));
+    }
+    setRatingSubmitStatus({ loading: false, error: null, success: false });
+    setRatingModalOpen(true);
+  }, [ratingStatus.loading, userRating]);
+
+  const handleCloseRatingModal = useCallback(() => {
+    if (ratingSubmitStatus.loading) {
+      return;
+    }
+    setRatingModalOpen(false);
+    setRatingSubmitStatus({ loading: false, error: null, success: false });
+  }, [ratingSubmitStatus.loading]);
+
+  const handleRatingScoreChange = useCallback((value) => {
+    const normalized = Math.max(1, Math.min(5, Number(value) || 5));
+    setRatingDraft((previous) => ({ ...previous, score: normalized }));
+  }, []);
+
+  const handleRatingCommentChange = useCallback((event) => {
+    setRatingDraft((previous) => ({
+      ...previous,
+      comment: event?.target?.value ?? "",
+    }));
+  }, []);
+
+  const handleSubmitRating = useCallback(async () => {
+    if (!agentId || !userId) {
+      setRatingSubmitStatus({
+        loading: false,
+        error: "登录后才能评分",
+        success: false,
+      });
+      return;
+    }
+    const score = Math.max(1, Math.min(5, Number(ratingDraft.score) || 5));
+    const comment = (ratingDraft.comment ?? "").trim();
+
+    setRatingSubmitStatus({ loading: true, error: null, success: false });
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/agents/${agentId}/ratings`,
+        {
+          method: "PUT",
+          headers: deriveHeaders({ "Content-Type": "application/json" }),
+          credentials: "include",
+          body: JSON.stringify({
+            user_id: Number(userId),
+            score,
+            comment,
+          }),
+        },
+      );
+
+      if (handleUnauthorizedResponse(response)) {
+        setRatingSubmitStatus({
+          loading: false,
+          error: null,
+          success: false,
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Rating update failed with ${response.status}`);
+      }
+
+      const data = await response.json();
+      const summaryNormalized = normalizeRatingSummary(data?.summary);
+      setCurrentRatingSummary(summaryNormalized);
+      notifyRatingSummaryChange(summaryNormalized);
+      setRatingStatus({ loading: false, error: null });
+
+      const normalizedUserRating = normalizeUserRating(data?.rating);
+      if (normalizedUserRating) {
+        setUserRating(normalizedUserRating);
+        setRatingDraft({
+          score: normalizedUserRating.score,
+          comment: normalizedUserRating.comment ?? "",
+        });
+      } else {
+        const fallbackRating = { score, comment };
+        setUserRating(fallbackRating);
+        setRatingDraft(fallbackRating);
+      }
+
+      setRatingSubmitStatus({ loading: false, error: null, success: true });
+      setRatingModalOpen(false);
+    } catch (error) {
+      console.error(error);
+      setRatingSubmitStatus({
+        loading: false,
+        error: error?.message ?? "提交评分失败",
+        success: false,
+      });
+    }
+  }, [
+    agentId,
+    userId,
+    ratingDraft.score,
+    ratingDraft.comment,
+    notifyRatingSummaryChange,
+    handleUnauthorizedResponse,
+  ]);
+
+  useEffect(() => {
+    if (typeof onRatingControllerChange !== "function") {
+      ratingControllerRef.current = null;
+      return undefined;
+    }
+    const controller = {
+      open: () => {
+        handleOpenRatingModal();
+      },
+    };
+    ratingControllerRef.current = controller;
+    onRatingControllerChange(controller);
+    return () => {
+      ratingControllerRef.current = null;
+      onRatingControllerChange(null);
+    };
+  }, [handleOpenRatingModal, onRatingControllerChange]);
 
   const initializeConversation = useCallback(async () => {
     if (!agentId || !userId) {
@@ -1096,53 +1395,63 @@ export default function ChatPanel({
     }
   }, [agentId, userId, handleUnauthorizedResponse, registerSpeech]);
 
-  const scheduleSpeechRefresh = useCallback((messageId, attempt = 0) => {
-    if (!messageId || attempt > 5) {
-      return;
-    }
-    const key = String(messageId);
-    if (speechRefreshTimersRef.current.has(key)) {
-      window.clearTimeout(speechRefreshTimersRef.current.get(key));
-    }
-    const delay = Math.min(8000, 1500 * (attempt + 1));
-    const timerId = window.setTimeout(async () => {
-      speechRefreshTimersRef.current.delete(key);
-      await loadMessagesRef.current();
-      const target = messagesRef.current.find((item) =>
-        String(item?.id ?? item?.ID ?? "") === key,
-      );
-      const extras = target?.extrasParsed ?? null;
+  const scheduleSpeechRefresh = useCallback(
+    (messageId, attempt = 0) => {
+      if (!messageId || attempt > 5) {
+        return;
+      }
+      const key = String(messageId);
+      if (speechRefreshTimersRef.current.has(key)) {
+        window.clearTimeout(speechRefreshTimersRef.current.get(key));
+      }
+      const delay = Math.min(8000, 1500 * (attempt + 1));
+      const timerId = window.setTimeout(async () => {
+        speechRefreshTimersRef.current.delete(key);
+        await loadMessagesRef.current();
+        const target = messagesRef.current.find(
+          (item) => String(item?.id ?? item?.ID ?? "") === key,
+        );
+        const extras = target?.extrasParsed ?? null;
+        const speech = extras?.speech;
+        const status = extras?.speech_status ?? extras?.speechStatus ?? "";
+        if (speech && speech.audio_base64) {
+          registerSpeech(target, {
+            enqueue: true,
+            force: true,
+            markPlayed: false,
+          });
+          return;
+        }
+        if (status === "pending") {
+          scheduleSpeechRefresh(messageId, attempt + 1);
+        }
+      }, delay);
+      speechRefreshTimersRef.current.set(key, timerId);
+    },
+    [registerSpeech],
+  );
+
+  const handleAssistantFinal = useCallback(
+    (assistantMessage) => {
+      if (!assistantMessage) {
+        return;
+      }
+      const extras = assistantMessage.extrasParsed ?? null;
       const speech = extras?.speech;
       const status = extras?.speech_status ?? extras?.speechStatus ?? "";
       if (speech && speech.audio_base64) {
-        registerSpeech(target, { enqueue: true, force: true, markPlayed: false });
+        registerSpeech(assistantMessage);
         return;
       }
       if (status === "pending") {
-        scheduleSpeechRefresh(messageId, attempt + 1);
+        const messageId = assistantMessage.id ?? assistantMessage.ID ?? null;
+        if (messageId != null) {
+          scheduleSpeechRefresh(messageId, 0);
+        }
       }
-    }, delay);
-    speechRefreshTimersRef.current.set(key, timerId);
-  }, [registerSpeech]);
-
-  const handleAssistantFinal = useCallback((assistantMessage) => {
-    if (!assistantMessage) {
-      return;
-    }
-    const extras = assistantMessage.extrasParsed ?? null;
-    const speech = extras?.speech;
-    const status = extras?.speech_status ?? extras?.speechStatus ?? "";
-    if (speech && speech.audio_base64) {
-      registerSpeech(assistantMessage);
-      return;
-    }
-    if (status === "pending") {
-      const messageId = assistantMessage.id ?? assistantMessage.ID ?? null;
-      if (messageId != null) {
-        scheduleSpeechRefresh(messageId, 0);
-      }
-    }
-  }, [registerSpeech, scheduleSpeechRefresh]);
+    },
+    [registerSpeech, scheduleSpeechRefresh],
+  );
 
   const loadMessages = useCallback(async () => {
     if (!agentId || !userId) {
@@ -1203,7 +1512,13 @@ export default function ChatPanel({
         error: error?.message ?? "Failed to load messages",
       });
     }
-  }, [agentId, userId, handleUnauthorizedResponse, registerSpeech, handleAssistantFinal]);
+  }, [
+    agentId,
+    userId,
+    handleUnauthorizedResponse,
+    registerSpeech,
+    handleAssistantFinal,
+  ]);
 
   const handleClearConversation = useCallback(async () => {
     if (!agentId || !userId) {
@@ -1306,7 +1621,6 @@ export default function ChatPanel({
     })();
   }, [agentId, userId, initializeConversation, loadMessages]);
 
-
   const sendChatMessage = useCallback(
     async (rawContent) => {
       const trimmed = typeof rawContent === "string" ? rawContent.trim() : "";
@@ -1314,7 +1628,8 @@ export default function ChatPanel({
         return { success: false, trimmed };
       }
       if (!agentId || !userId) {
-        const errorMessage = "Missing agent or user information. Please refresh.";
+        const errorMessage =
+          "Missing agent or user information. Please refresh.";
         setSendError(errorMessage);
         return { success: false, trimmed, error: errorMessage };
       }
@@ -1335,10 +1650,10 @@ export default function ChatPanel({
 
       const targetVoice = selectedVoice || voiceStatus.defaultVoice || "";
       const settings = selectedVoiceOption?.settings ?? {};
-      const speedRange =
-        settings.speed_range ?? settings.SpeedRange ?? [0.5, 1.6];
-      const pitchRange =
-        settings.pitch_range ?? settings.PitchRange ?? [0.7, 1.4];
+      const speedRange = settings.speed_range ??
+        settings.SpeedRange ?? [0.5, 1.6];
+      const pitchRange = settings.pitch_range ??
+        settings.PitchRange ?? [0.7, 1.4];
       const payload = {
         agent_id: agentId,
         user_id: userId,
@@ -1384,7 +1699,9 @@ export default function ChatPanel({
           return { success: false, trimmed, error: "unauthorized" };
         }
 
-        const contentType = (response.headers.get("Content-Type") ?? "").toLowerCase();
+        const contentType = (
+          response.headers.get("Content-Type") ?? ""
+        ).toLowerCase();
 
         if (!response.ok) {
           throw new Error(`Send failed with status ${response.status}`);
@@ -1490,7 +1807,8 @@ export default function ChatPanel({
             }
             case "assistant_delta": {
               const targetId = payload?.id ?? payload?.ID ?? null;
-              const full = typeof payload?.full === "string" ? payload.full : "";
+              const full =
+                typeof payload?.full === "string" ? payload.full : "";
               if (targetId && full) {
                 applyAssistantDelta(targetId, full);
               }
@@ -1671,7 +1989,6 @@ export default function ChatPanel({
     loadMessagesRef.current = loadMessages;
   }, [loadMessages]);
 
-
   const handleSend = useCallback(
     async (event) => {
       event?.preventDefault?.();
@@ -1742,7 +2059,8 @@ export default function ChatPanel({
   }, [handleVoiceTranscript]);
 
   useEffect(() => {
-    phoneVoiceLoopRef.current = isPhoneMode && phoneCallActive && microphoneActive;
+    phoneVoiceLoopRef.current =
+      isPhoneMode && phoneCallActive && microphoneActive;
   }, [isPhoneMode, phoneCallActive, microphoneActive]);
 
   useEffect(() => {
@@ -1775,7 +2093,13 @@ export default function ChatPanel({
     } else if (isListeningRef.current) {
       stopRecognition();
     }
-  }, [isPhoneMode, phoneCallActive, microphoneActive, startRecognition, stopRecognition]);
+  }, [
+    isPhoneMode,
+    phoneCallActive,
+    microphoneActive,
+    startRecognition,
+    stopRecognition,
+  ]);
 
   useEffect(() => {
     if (!isPhoneMode || !phoneCallActive || !callStartedAt) {
@@ -1927,9 +2251,25 @@ export default function ChatPanel({
                 </>
               ) : null}
             </div>
+            <AgentRatingSummary
+              average={currentRatingSummary.average_score}
+              count={currentRatingSummary.rating_count}
+              size="sm"
+              className="mt-3 w-fit"
+            />
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-gray-500">
+          {showRatingButton ? (
+            <button
+              type="button"
+              onClick={handleOpenRatingModal}
+              disabled={!userId || ratingStatus.loading}
+              className="rounded-full border border-amber-200 px-4 py-2 text-xs font-medium text-amber-600 transition hover:border-amber-300 hover:text-amber-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+            >
+              {userRating ? "修改评分" : "评价智能体"}
+            </button>
+          ) : null}
           {!isPhoneMode ? (
             <Link
               href={`/smart/${agentId ?? ""}/phone`}
@@ -1952,6 +2292,16 @@ export default function ChatPanel({
         </div>
       </header>
 
+      {ratingStatus.error ? (
+        <div className="mx-4 mt-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-600">
+          {ratingStatus.error}
+        </div>
+      ) : null}
+      {ratingSubmitStatus.success ? (
+        <div className="mx-4 mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-600">
+          已更新智能体评分，感谢反馈！
+        </div>
+      ) : null}
 
       {voiceStatus.enabled ? (
         <div className="border-b border-white/40 bg-white/70 px-4 py-3 text-xs text-gray-600">
@@ -2348,9 +2698,122 @@ export default function ChatPanel({
             </div>
           </form>
         )}
-
       </div>
+      {isMounted && ratingModalOpen
+        ? createPortal(
+            <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-slate-900/60 px-4">
+              <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      为智能体打分
+                    </h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                      请选择 1-5 分并留下反馈意见，稍后可继续修改。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCloseRatingModal}
+                    className="rounded-full border border-gray-200 p-1.5 text-gray-500 transition hover:border-gray-300 hover:text-gray-700"
+                    aria-label="关闭评分弹窗"
+                  >
+                    <span className="block h-5 w-5 text-center">×</span>
+                  </button>
+                </div>
+
+                <div className="mt-4 flex flex-col gap-5">
+                  <AgentRatingSummary
+                    average={currentRatingSummary.average_score}
+                    count={currentRatingSummary.rating_count}
+                    size="md"
+                    className="w-fit"
+                  />
+
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="flex items-center justify-center gap-2">
+                      {[1, 2, 3, 4, 5].map((value) => {
+                        const active = ratingDraft.score >= value;
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            onClick={() => handleRatingScoreChange(value)}
+                            className={`flex h-10 w-10 items-center justify-center rounded-full border transition ${
+                              active
+                                ? "border-amber-400 bg-amber-50 text-amber-600"
+                                : "border-gray-200 bg-gray-50 text-gray-400"
+                            }`}
+                            aria-label={`${value} 分`}
+                          >
+                            <svg
+                              viewBox="0 0 24 24"
+                              className={`h-5 w-5 ${active ? "text-amber-500" : "text-gray-300"}`}
+                              fill="currentColor"
+                              aria-hidden
+                            >
+                              <path d="M12 2.5l2.89 6.02 6.67.55-5.04 4.46 1.5 6.47L12 16.96l-6.02 3.04 1.5-6.47-5.04-4.46 6.67-.55L12 2.5z" />
+                            </svg>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <span className="text-sm text-gray-500">
+                      当前选择：{ratingDraft.score} 分
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label
+                      className="text-sm font-medium text-gray-700"
+                      htmlFor="agent-rating-comment"
+                    >
+                      留下反馈（可选）
+                    </label>
+                    <textarea
+                      id="agent-rating-comment"
+                      value={ratingDraft.comment}
+                      onChange={handleRatingCommentChange}
+                      rows={4}
+                      maxLength={500}
+                      placeholder="告诉我们这个智能体的表现如何..."
+                      className="w-full resize-none rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-100"
+                    />
+                    <span className="self-end text-[11px] text-gray-400">
+                      {(ratingDraft.comment ?? "").length}/500
+                    </span>
+                  </div>
+
+                  {ratingSubmitStatus.error ? (
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-600">
+                      {ratingSubmitStatus.error}
+                    </div>
+                  ) : null}
+
+                  <div className="flex justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={handleCloseRatingModal}
+                      className="rounded-full border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-800"
+                      disabled={ratingSubmitStatus.loading}
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSubmitRating}
+                      disabled={ratingSubmitStatus.loading || !userId}
+                      className="rounded-full bg-amber-500 px-5 py-2 text-sm font-semibold text-white shadow transition hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-amber-300"
+                    >
+                      {ratingSubmitStatus.loading ? "提交中..." : "提交评分"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </section>
   );
 }
-

@@ -20,8 +20,18 @@ function mapError(response, fallback, serverMessage) {
     if (normalized.includes("username already exists")) {
       return "该用户名已存在";
     }
+    if (normalized.includes("invalid email")) {
+      return "请输入有效的电子邮箱地址";
+    }
+    if (
+      normalized.includes("email already exists") ||
+      normalized.includes("email already in use") ||
+      normalized.includes("email already exist")
+    ) {
+      return "该邮箱已被占用";
+    }
     if (normalized.includes("password")) {
-      return "请设置符合要求的密码";
+      return "密码不符合要求";
     }
   }
 
@@ -32,7 +42,7 @@ function mapError(response, fallback, serverMessage) {
     return "该用户名已存在";
   }
   if (response.status === 400) {
-    return normalized || "用户名和密码不满足要求";
+    return normalized || "用户名或密码不满足要求";
   }
   return fallback;
 }
@@ -56,7 +66,7 @@ async function extractServerMessage(response) {
 
 export default function RegisterPage() {
   const router = useRouter();
-  const [values, setValues] = useState({ username: "", password: "" });
+  const [values, setValues] = useState({ username: "", nickname: "", email: "", password: "" });
   const [captcha, setCaptcha] = useState({ id: "", question: "", expiresAt: "", loading: false });
   const [captchaAnswer, setCaptchaAnswer] = useState("");
   const [captchaError, setCaptchaError] = useState("");
@@ -125,6 +135,31 @@ export default function RegisterPage() {
       return;
     }
 
+    const trimmedUsername = values.username.trim();
+    const trimmedNickname = values.nickname.trim();
+    const trimmedEmail = values.email.trim();
+
+    if (!trimmedUsername) {
+      setError("请输入用户名");
+      setSubmitting(false);
+      return;
+    }
+    if (!trimmedNickname) {
+      setError("请输入昵称");
+      setSubmitting(false);
+      return;
+    }
+    if (!trimmedEmail) {
+      setError("请输入电子邮箱地址");
+      setSubmitting(false);
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setError("请输入有效的电子邮箱地址");
+      setSubmitting(false);
+      return;
+    }
+
     try {
       const response = await fetch(`${API_BASE_URL}/register`, {
         method: "POST",
@@ -133,7 +168,9 @@ export default function RegisterPage() {
           Accept: "application/json",
         },
         body: JSON.stringify({
-          username: values.username.trim(),
+          username: trimmedUsername,
+          nickname: trimmedNickname,
+          email: trimmedEmail,
           password: values.password,
           captcha_id: captcha.id,
           captcha_answer: captchaAnswer.trim(),
@@ -183,6 +220,40 @@ export default function RegisterPage() {
               placeholder="请输入用户名"
             />
           </div>
+          <div className="space-y-2">
+            <label htmlFor="nickname" className="block text-sm font-medium text-slate-600">
+              昵称
+            </label>
+            <input
+              id="nickname"
+              name="nickname"
+              type="text"
+              autoComplete="nickname"
+              required
+              value={values.nickname}
+              onChange={handleChange}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              placeholder="请输入昵称"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label htmlFor="email" className="block text-sm font-medium text-slate-600">
+              电子邮箱
+            </label>
+            <input
+              id="email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              required
+              value={values.email}
+              onChange={handleChange}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              placeholder="请输入电子邮箱地址"
+            />
+          </div>
+
 
           <div className="space-y-2">
             <label htmlFor="password" className="block text-sm font-medium text-slate-600">

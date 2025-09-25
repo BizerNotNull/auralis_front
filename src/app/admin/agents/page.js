@@ -3,10 +3,63 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
+import {
+  FALLBACK_CHAT_MODELS,
+  findChatModel,
+  normalizeChatModels,
+  sortChatModels,
+} from "@/lib/chatModels";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+const API_BASE_URL = getApiBaseUrl();
+
+const STATUS_FILTER_OPTIONS = [
+  { value: "pending", label: "Pending" },
+  { value: "active", label: "Active" },
+  { value: "rejected", label: "Rejected" },
+  { value: "paused", label: "Paused" },
+  { value: "archived", label: "Archived" },
+  { value: "all", label: "All" },
+];
+
+const ADMIN_STATUS_OPTIONS = [
+  { value: "pending", label: "Pending" },
+  { value: "active", label: "Active" },
+  { value: "rejected", label: "Rejected" },
+  { value: "paused", label: "Paused" },
+  { value: "archived", label: "Archived" },
+  { value: "draft", label: "Draft" },
+];
+
+function formatStatusLabel(status) {
+  if (!status) {
+    return "Unknown";
+  }
+  const lower = String(status).toLowerCase();
+  if (!lower) {
+    return "Unknown";
+  }
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function statusBadgeClasses(status) {
+  switch (String(status).toLowerCase()) {
+    case "pending":
+      return "border-amber-200 bg-amber-50 text-amber-600";
+    case "active":
+      return "border-emerald-200 bg-emerald-50 text-emerald-600";
+    case "rejected":
+      return "border-rose-200 bg-rose-50 text-rose-600";
+    case "paused":
+      return "border-slate-200 bg-slate-100 text-slate-600";
+    case "archived":
+      return "border-slate-300 bg-slate-200 text-slate-500";
+    default:
+      return "border-slate-200 bg-slate-100 text-slate-500";
+  }
+}
+
 
 function pickStoredToken() {
   if (typeof window === "undefined") {
@@ -38,6 +91,7 @@ function deriveHeaders(extra) {
 
 const emptyForm = {
   name: "",
+  one_sentence_intro: "",
   persona_desc: "",
   opening_line: "",
   first_turn_hint: "",
@@ -52,16 +106,36 @@ const emptyForm = {
 
 export default function AdminAgentsPage() {
   const [profile, setProfile] = useState(null);
-  const [profileStatus, setProfileStatus] = useState({ loading: false, error: null });
+  const [profileStatus, setProfileStatus] = useState({
+    loading: false,
+    error: null,
+  });
   const [agents, setAgents] = useState([]);
-  const [agentsStatus, setAgentsStatus] = useState({ loading: false, error: null });
+  const [agentsStatus, setAgentsStatus] = useState({
+    loading: false,
+    error: null,
+  });
+  const [statusFilter, setStatusFilter] = useState("pending");
   const [selectedAgentId, setSelectedAgentId] = useState(null);
   const [agentDetail, setAgentDetail] = useState(null);
-  const [agentDetailStatus, setAgentDetailStatus] = useState({ loading: false, error: null });
+  const [agentDetailStatus, setAgentDetailStatus] = useState({
+    loading: false,
+    error: null,
+  });
   const [formValues, setFormValues] = useState(emptyForm);
   const [avatarFile, setAvatarFile] = useState(null);
   const [removeAvatar, setRemoveAvatar] = useState(false);
-  const [submitStatus, setSubmitStatus] = useState({ loading: false, error: null, success: null });
+  const [submitStatus, setSubmitStatus] = useState({
+    loading: false,
+    error: null,
+    success: null,
+  });
+
+  const [chatModels, setChatModels] = useState(FALLBACK_CHAT_MODELS);
+  const [chatModelStatus, setChatModelStatus] = useState({
+    loading: false,
+    error: null,
+  });
 
   const avatarPreviewUrl = useMemo(() => {
     if (!avatarFile) {
@@ -103,25 +177,43 @@ export default function AdminAgentsPage() {
     }
   }, []);
 
-  const loadAgents = useCallback(async () => {
+const loadAgents = useCallback(async () => {
     setAgentsStatus({ loading: true, error: null });
     try {
-      const response = await fetch(`${API_BASE_URL}/agents`, {
+      const query =
+        statusFilter && statusFilter !== "all"
+          ? `?status=${encodeURIComponent(statusFilter)}`
+          : "";
+      const response = await fetch(`${API_BASE_URL}/admin/agents${query}`, {
         method: "GET",
         headers: deriveHeaders(),
         credentials: "include",
         cache: "no-store",
       });
       if (!response.ok) {
-        throw new Error(`list agents failed with ${response.status}`);
+        throw new Error(`list admin agents failed with ${response.status}`);
       }
       const data = await response.json();
       const list = Array.isArray(data?.agents) ? data.agents : [];
       setAgents(list);
       setAgentsStatus({ loading: false, error: null });
       if (list.length) {
-        const firstId = list[0]?.id ?? list[0]?.ID ?? null;
-        setSelectedAgentId((prev) => prev ?? firstId);
+        const firstIdRaw = list[0]?.id ?? list[0]?.ID ?? null;
+        const firstId = firstIdRaw != null ? String(firstIdRaw) : null;
+        setSelectedAgentId((prev) => {
+          if (!prev) {
+            return firstId;
+          }
+          const normalizedPrev = String(prev);
+          const exists = list.some((agent) => {
+            const candidate = agent?.id ?? agent?.ID ?? null;
+            return candidate != null && String(candidate) === normalizedPrev;
+          });
+          return exists ? normalizedPrev : firstId;
+        });
+      } else {
+        setSelectedAgentId(null);
+        setAgentDetail(null);
       }
     } catch (error) {
       console.error(error);
@@ -131,7 +223,7 @@ export default function AdminAgentsPage() {
         error: error?.message ?? "Failed to load agents",
       });
     }
-  }, []);
+  }, [statusFilter]);
 
   useEffect(() => {
     loadProfile();
@@ -162,6 +254,97 @@ export default function AdminAgentsPage() {
   }, [isAdmin, loadAgents]);
 
   useEffect(() => {
+    if (!isAdmin) {
+      return;
+    }
+
+    let cancelled = false;
+    setChatModelStatus({ loading: true, error: null });
+
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/llm/models`, {
+          method: "GET",
+          headers: deriveHeaders(),
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`AI 模型列表请求失败：${response.status}`);
+        }
+        const data = await response.json();
+        if (cancelled) {
+          return;
+        }
+        const list = normalizeChatModels(data?.models);
+        setChatModels(list.length ? list : FALLBACK_CHAT_MODELS);
+        setChatModelStatus({ loading: false, error: null });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        console.error(error);
+        setChatModels(FALLBACK_CHAT_MODELS);
+        setChatModelStatus({
+          loading: false,
+          error: error?.message ?? "加载 AI 模型列表失败",
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
+
+  const chatModelOptions = useMemo(
+    () => sortChatModels(chatModels),
+    [chatModels],
+  );
+
+  useEffect(() => {
+    if (!chatModelOptions.length) {
+      return;
+    }
+
+    const provider = (formValues.model_provider ?? "").trim();
+    const modelName = (formValues.model_name ?? "").trim();
+    if (provider && modelName) {
+      return;
+    }
+
+    const fallback = chatModelOptions[0];
+    if (!fallback) {
+      return;
+    }
+
+    setFormValues((prev) => ({
+      ...prev,
+      model_provider: fallback.provider,
+      model_name: fallback.name,
+    }));
+  }, [
+    chatModelOptions,
+    formValues.model_name,
+    formValues.model_provider,
+    setFormValues,
+  ]);
+
+  const selectedChatModel = useMemo(
+    () =>
+      findChatModel(
+        chatModelOptions,
+        formValues.model_provider,
+        formValues.model_name,
+      ),
+    [chatModelOptions, formValues.model_provider, formValues.model_name],
+  );
+
+  const chatModelSelectValue = selectedChatModel?.key ?? "";
+  const chatModelDescription = selectedChatModel?.description ?? "";
+  const chatModelCapabilities = selectedChatModel?.capabilities ?? [];
+
+  useEffect(() => {
     if (!selectedAgentId || !isAdmin) {
       return;
     }
@@ -170,12 +353,15 @@ export default function AdminAgentsPage() {
 
     const fetchDetail = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/agents/${selectedAgentId}`, {
-          method: "GET",
-          headers: deriveHeaders(),
-          credentials: "include",
-          cache: "no-store",
-        });
+        const response = await fetch(
+          `${API_BASE_URL}/agents/${selectedAgentId}`,
+          {
+            method: "GET",
+            headers: deriveHeaders(),
+            credentials: "include",
+            cache: "no-store",
+          },
+        );
         if (!response.ok) {
           throw new Error(`load agent detail failed with ${response.status}`);
         }
@@ -215,7 +401,8 @@ export default function AdminAgentsPage() {
     const paramsRaw = config.model_params ?? config.modelParams;
     if (paramsRaw) {
       try {
-        const parsed = typeof paramsRaw === "string" ? JSON.parse(paramsRaw) : paramsRaw;
+        const parsed =
+          typeof paramsRaw === "string" ? JSON.parse(paramsRaw) : paramsRaw;
         if (parsed && typeof parsed === "object") {
           if (parsed.temperature !== undefined) {
             temperature = String(parsed.temperature);
@@ -231,6 +418,7 @@ export default function AdminAgentsPage() {
 
     setFormValues({
       name: detail?.name ?? "",
+      one_sentence_intro: detail?.one_sentence_intro ?? detail?.oneSentenceIntro ?? "",
       persona_desc: detail?.persona_desc ?? "",
       opening_line: detail?.opening_line ?? "",
       first_turn_hint: detail?.first_turn_hint ?? "",
@@ -239,7 +427,7 @@ export default function AdminAgentsPage() {
       temperature,
       max_tokens: maxTokens,
       system_prompt: config?.system_prompt ?? "",
-      status: detail?.status ?? "active",
+      status: detail?.status ?? "pending",
       avatar_url: detail?.avatar_url ?? detail?.avatarUrl ?? "",
     });
     setAvatarFile(null);
@@ -252,6 +440,27 @@ export default function AdminAgentsPage() {
     }
   }, [agentDetail, applyAgentDetail]);
 
+  const handleChatModelPresetChange = useCallback(
+    (event) => {
+      const key = event.target.value;
+      if (!key) {
+        return;
+      }
+      const [providerRaw, nameRaw] = key.split(":::", 2);
+      const provider = (providerRaw ?? "").trim();
+      const modelName = (nameRaw ?? "").trim();
+      if (!provider || !modelName) {
+        return;
+      }
+      setFormValues((prev) => ({
+        ...prev,
+        model_provider: provider,
+        model_name: modelName,
+      }));
+    },
+    [setFormValues],
+  );
+
   const handleInputChange = (event) => {
     const { name, value } = event.target;
     setFormValues((prev) => ({ ...prev, [name]: value }));
@@ -259,6 +468,13 @@ export default function AdminAgentsPage() {
 
   const handleStatusChange = (event) => {
     setFormValues((prev) => ({ ...prev, status: event.target.value }));
+  };
+
+  const handleFilterChange = (event) => {
+    const value = event.target.value;
+    setStatusFilter(value);
+    setSelectedAgentId(null);
+    setAgentDetail(null);
   };
 
   const handleAvatarChange = (event) => {
@@ -286,17 +502,20 @@ export default function AdminAgentsPage() {
     try {
       const formData = new FormData();
       formData.append("name", formValues.name.trim());
+      formData.append("one_sentence_intro", (formValues.one_sentence_intro ?? "").trim());
       formData.append("persona_desc", (formValues.persona_desc ?? "").trim());
       formData.append("opening_line", (formValues.opening_line ?? "").trim());
-      formData.append("first_turn_hint", (formValues.first_turn_hint ?? "").trim());
       formData.append(
-        "model_provider",
-        formValues.model_provider.trim() || formValues.model_provider || "openai",
+        "first_turn_hint",
+        (formValues.first_turn_hint ?? "").trim(),
       );
-      formData.append(
-        "model_name",
-        formValues.model_name.trim() || formValues.model_name || "gpt-oss-120b",
-      );
+      const provider = (formValues.model_provider ?? "").trim();
+      const modelName = (formValues.model_name ?? "").trim();
+      if (!providerValue || !modelNameValue) {
+        throw new Error("请先选择一个可用的 AI 模型");
+      }
+      formData.append("model_provider", providerValue);
+      formData.append("model_name", modelNameValue);
       formData.append("system_prompt", formValues.system_prompt ?? "");
       formData.append("status", formValues.status.trim() || "active");
 
@@ -323,12 +542,15 @@ export default function AdminAgentsPage() {
         formData.append("remove_avatar", "true");
       }
 
-      const response = await fetch(`${API_BASE_URL}/agents/${selectedAgentId}`, {
-        method: "PUT",
-        headers: deriveHeaders(),
-        credentials: "include",
-        body: formData,
-      });
+      const response = await fetch(
+        `${API_BASE_URL}/agents/${selectedAgentId}`,
+        {
+          method: "PUT",
+          headers: deriveHeaders(),
+          credentials: "include",
+          body: formData,
+        },
+      );
 
       if (!response.ok) {
         const text = await response.text();
@@ -337,17 +559,25 @@ export default function AdminAgentsPage() {
 
       const data = await response.json();
       const updatedAgent = data?.agent;
-      setSubmitStatus({ loading: false, error: null, success: "Changes saved" });
+      const statusAfterUpdate = updatedAgent?.status ?? formValues.status;
+      setSubmitStatus({
+        loading: false,
+        error: null,
+        success: `Changes saved. Status: ${formatStatusLabel(statusAfterUpdate)}`,
+      });
       setAvatarFile(null);
       setRemoveAvatar(false);
 
       if (updatedAgent) {
-        setAgents((prev) =>
-          prev.map((item) => {
-            const itemId = item?.id ?? item?.ID;
-            return itemId === updatedAgent.id ? updatedAgent : item;
-          }),
-        );
+        const updatedId = updatedAgent?.id ?? updatedAgent?.ID ?? null;
+        if (updatedId != null) {
+          setAgents((prev) =>
+            prev.map((item) => {
+              const itemId = item?.id ?? item?.ID ?? null;
+              return itemId != null && String(itemId) === String(updatedId) ? updatedAgent : item;
+            }),
+          );
+        }
         applyAgentDetail({
           agent: updatedAgent,
           chat_config: data?.chat_config ?? null,
@@ -370,9 +600,12 @@ export default function AdminAgentsPage() {
       <div className="mx-auto w-full max-w-7xl px-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-900">Agent Administration</h1>
+            <h1 className="text-2xl font-semibold text-slate-900">
+              Agent Administration
+            </h1>
             <p className="mt-1 text-sm text-slate-500">
-              Manage agent metadata, avatars, and model configuration. Admin access is required.
+              Manage agent metadata, avatars, and model configuration. Admin
+              access is required.
             </p>
           </div>
           <Link
@@ -393,14 +626,15 @@ export default function AdminAgentsPage() {
 
         {!profileStatus.loading && !isAdmin ? (
           <div className="mt-10 rounded-3xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-700">
-            Your account does not have administrator privileges. Please contact an administrator if you need access.
+            Your account does not have administrator privileges. Please contact
+            an administrator if you need access.
           </div>
         ) : null}
 
         {isAdmin ? (
           <div className="mt-10 grid gap-6 lg:grid-cols-[320px,1fr]">
             <aside className="flex h-fit flex-col gap-4 rounded-3xl border border-white/60 bg-white/90 p-5 shadow-xl backdrop-blur">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold text-slate-700">Agents</h2>
                 <button
                   type="button"
@@ -411,6 +645,23 @@ export default function AdminAgentsPage() {
                   {agentsStatus.loading ? "Refreshing..." : "Refresh"}
                 </button>
               </div>
+              <div className="flex flex-col gap-2">
+                <label className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                  Status filter
+                </label>
+                <select
+                  value={statusFilter}
+                  onChange={handleFilterChange}
+                  disabled={agentsStatus.loading}
+                  className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:text-slate-300"
+                >
+                  {STATUS_FILTER_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               {agentsStatus.error ? (
                 <p className="rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-500">
                   {agentsStatus.error}
@@ -418,37 +669,51 @@ export default function AdminAgentsPage() {
               ) : null}
               <ul className="space-y-2">
                 {agents.map((agent) => {
-                  const agentId = agent?.id ?? agent?.ID;
-                  const avatarUrl = resolveAssetUrl(agent?.avatar_url ?? agent?.avatarUrl ?? "");
-                  const isActive = agentId === selectedAgentId;
-                  const name = agent?.name ?? `Agent ${agentId ?? ""}`;
+                  const rawId = agent?.id ?? agent?.ID;
+                  const agentId = rawId != null ? String(rawId) : "";
+                  const activeId = selectedAgentId != null ? String(selectedAgentId) : "";
+                  const avatarUrl = resolveAssetUrl(
+                    agent?.avatar_url ?? agent?.avatarUrl ?? "",
+                  );
+                  const isActive = agentId !== "" && agentId === activeId;
+                  const name = agent?.name ?? `Agent ${agentId || ""}`;
                   const initial = name.trim()?.charAt(0)?.toUpperCase() ?? "A";
+                  const status = agent?.status ?? "";
+                  const statusLabel = formatStatusLabel(status);
+                  const statusClasses = statusBadgeClasses(status);
                   return (
-                    <li key={agentId ?? Math.random()}>
+                    <li key={agentId || Math.random()}>
                       <button
                         type="button"
                         onClick={() => setSelectedAgentId(agentId)}
-                        className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-2 text-left text-sm transition ${
+                        className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-left text-sm transition ${
                           isActive
                             ? "border-blue-300 bg-blue-50 text-blue-600"
                             : "border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:text-blue-500"
                         }`}
                       >
-                        {avatarUrl ? (
-                          <img
-                            src={avatarUrl}
-                            alt={`${name} avatar`}
-                            className="h-9 w-9 rounded-full object-cover shadow"
-                          />
-                        ) : (
-                          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-200 text-xs font-semibold text-slate-600">
-                            {initial}
+                        <div className="flex items-center gap-3">
+                          {avatarUrl ? (
+                            <img
+                              src={avatarUrl}
+                              alt={`${name} avatar`}
+                              className="h-9 w-9 rounded-full object-cover shadow"
+                            />
+                          ) : (
+                            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-200 text-xs font-semibold text-slate-600">
+                              {initial}
+                            </div>
+                          )}
+                          <div className="flex flex-col">
+                            <span className="font-medium">{name}</span>
+                            <span className="text-[11px] text-slate-400">ID: {agentId || "--"}</span>
                           </div>
-                        )}
-                        <div className="flex flex-col">
-                          <span className="font-medium">{name}</span>
-                          <span className="text-xs text-slate-400">Status: {agent?.status ?? "active"}</span>
                         </div>
+                        <span
+                          className={`rounded-full border px-3 py-1 text-[11px] font-semibold ${statusClasses}`}
+                        >
+                          {statusLabel}
+                        </span>
                       </button>
                     </li>
                   );
@@ -458,7 +723,9 @@ export default function AdminAgentsPage() {
 
             <section className="rounded-3xl border border-white/60 bg-white/90 p-6 shadow-xl backdrop-blur">
               {agentDetailStatus.loading ? (
-                <p className="text-sm text-slate-500">Loading agent detail...</p>
+                <p className="text-sm text-slate-500">
+                  Loading agent detail...
+                </p>
               ) : null}
 
               {agentDetailStatus.error ? (
@@ -472,10 +739,25 @@ export default function AdminAgentsPage() {
                   <div className="flex items-start justify-between">
                     <div>
                       <h2 className="text-lg font-semibold text-slate-900">
-                        Edit: {agentDetail.agent.name ?? `Agent ${selectedAgentId ?? ""}`}
+                        Edit:{" "}
+                        {agentDetail.agent.name ??
+                          `Agent ${selectedAgentId ?? ""}`}
                       </h2>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span
+                          className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClasses(
+                            agentDetail.agent.status ?? ""
+                          )}`}
+                        >
+                          {formatStatusLabel(agentDetail.agent.status ?? "")}
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          ID: {agentDetail.agent.id ?? agentDetail.agent.ID ?? "--"}
+                        </span>
+                      </div>
                       <p className="mt-1 text-xs text-slate-400">
-                        Update metadata and model configuration, then save to apply the changes.
+                        Update metadata and model configuration, then save to
+                        apply the changes.
                       </p>
                     </div>
                     <Link
@@ -488,7 +770,9 @@ export default function AdminAgentsPage() {
 
                   <div className="grid gap-4 md:grid-cols-2">
                     <label className="flex flex-col gap-2">
-                      <span className="text-sm font-medium text-slate-600">Display name *</span>
+                      <span className="text-sm font-medium text-slate-600">
+                        Display name *
+                      </span>
                       <input
                         name="name"
                         value={formValues.name}
@@ -499,24 +783,29 @@ export default function AdminAgentsPage() {
                       />
                     </label>
                     <label className="flex flex-col gap-2">
-                      <span className="text-sm font-medium text-slate-600">Status</span>
+                      <span className="text-sm font-medium text-slate-600">
+                        Status
+                      </span>
                       <select
                         name="status"
                         value={formValues.status}
                         onChange={handleStatusChange}
                         className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
                       >
-                        <option value="active">Active</option>
-                        <option value="draft">Draft</option>
-                        <option value="paused">Paused</option>
-                        <option value="archived">Archived</option>
+                        {ADMIN_STATUS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
                       </select>
                     </label>
                   </div>
 
                   <div className="grid gap-4 md:grid-cols-[200px,1fr]">
                     <div className="flex flex-col gap-2">
-                      <span className="text-sm font-medium text-slate-600">Avatar</span>
+                      <span className="text-sm font-medium text-slate-600">
+                        Avatar
+                      </span>
                       {avatarPreviewUrl ? (
                         <img
                           src={avatarPreviewUrl}
@@ -546,7 +835,9 @@ export default function AdminAgentsPage() {
                           onClick={toggleRemoveAvatar}
                           className="w-fit rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-500 transition hover:border-red-300 hover:text-red-500"
                         >
-                          {removeAvatar ? "Keep existing avatar" : "Remove existing avatar"}
+                          {removeAvatar
+                            ? "Keep existing avatar"
+                            : "Remove existing avatar"}
                         </button>
                       ) : null}
                       {avatarFile ? (
@@ -562,7 +853,9 @@ export default function AdminAgentsPage() {
 
                     <div className="grid gap-4">
                       <label className="flex flex-col gap-2">
-                        <span className="text-sm font-medium text-slate-600">Opening line</span>
+                        <span className="text-sm font-medium text-slate-600">
+                          Opening line
+                        </span>
                         <input
                           name="opening_line"
                           value={formValues.opening_line}
@@ -571,7 +864,9 @@ export default function AdminAgentsPage() {
                         />
                       </label>
                       <label className="flex flex-col gap-2">
-                        <span className="text-sm font-medium text-slate-600">First turn hint</span>
+                        <span className="text-sm font-medium text-slate-600">
+                          First turn hint
+                        </span>
                         <input
                           name="first_turn_hint"
                           value={formValues.first_turn_hint}
@@ -580,7 +875,21 @@ export default function AdminAgentsPage() {
                         />
                       </label>
                       <label className="flex flex-col gap-2">
-                        <span className="text-sm font-medium text-slate-600">Persona</span>
+                        <span className="text-sm font-medium text-slate-600">
+                          One sentence intro
+                        </span>
+                        <textarea
+                          name="one_sentence_intro"
+                          value={formValues.one_sentence_intro}
+                          onChange={handleInputChange}
+                          rows={2}
+                          className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2">
+                        <span className="text-sm font-medium text-slate-600">
+                          Persona
+                        </span>
                         <textarea
                           name="persona_desc"
                           value={formValues.persona_desc}
@@ -592,32 +901,76 @@ export default function AdminAgentsPage() {
                     </div>
                   </div>
 
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <label className="flex flex-col gap-2">
-                      <span className="text-sm font-medium text-slate-600">Model provider *</span>
-                      <input
-                        name="model_provider"
-                        value={formValues.model_provider}
-                        onChange={handleInputChange}
-                        required
-                        className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2">
-                      <span className="text-sm font-medium text-slate-600">Model name *</span>
-                      <input
-                        name="model_name"
-                        value={formValues.model_name}
-                        onChange={handleInputChange}
-                        required
-                        className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                      />
-                    </label>
-                  </div>
+                  <section className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-slate-600">
+                        选择 AI 模型
+                      </span>
+                      {chatModelStatus.loading ? (
+                        <span className="text-xs text-slate-400">
+                          加载中...
+                        </span>
+                      ) : chatModelStatus.error ? (
+                        <span className="text-xs text-amber-500">
+                          {chatModelStatus.error}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-400">
+                          {chatModelOptions.length} 个可选
+                        </span>
+                      )}
+                    </div>
+                    <select
+                      value={chatModelSelectValue}
+                      onChange={handleChatModelPresetChange}
+                      className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                    >
+                      <option value="" disabled>
+                        请选择一个可用模型
+                      </option>
+                      {chatModelOptions.map((model) => (
+                        <option key={model.key} value={model.key}>
+                          {model.displayName} · {model.providerLabel}
+                          {model.recommended ? "（推荐）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {selectedChatModel ? (
+                      <div className="text-xs text-slate-500">
+                        {chatModelDescription ? (
+                          <p>{chatModelDescription}</p>
+                        ) : null}
+                        {chatModelCapabilities.length ? (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {chatModelCapabilities.map((capability) => (
+                              <span
+                                key={`${selectedChatModel?.key ?? "preset"}-${capability}`}
+                                className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600"
+                              >
+                                {capability}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-amber-600">
+                        当前配置未在列表中，保存时会沿用原模型：
+                        {formValues.model_provider || "未选择"} /{" "}
+                        {formValues.model_name || "未选择"}。
+                      </p>
+                    )}
+                  </section>
+                  <p className="text-xs text-slate-400">
+                    当前将使用：{formValues.model_provider || "未选择"} /{" "}
+                    {formValues.model_name || "未选择"}
+                  </p>
 
                   <div className="grid gap-4 md:grid-cols-2">
                     <label className="flex flex-col gap-2">
-                      <span className="text-sm font-medium text-slate-600">Temperature</span>
+                      <span className="text-sm font-medium text-slate-600">
+                        Temperature
+                      </span>
                       <input
                         name="temperature"
                         value={formValues.temperature}
@@ -627,7 +980,9 @@ export default function AdminAgentsPage() {
                       />
                     </label>
                     <label className="flex flex-col gap-2">
-                      <span className="text-sm font-medium text-slate-600">Max tokens</span>
+                      <span className="text-sm font-medium text-slate-600">
+                        Max tokens
+                      </span>
                       <input
                         name="max_tokens"
                         value={formValues.max_tokens}
@@ -639,7 +994,9 @@ export default function AdminAgentsPage() {
                   </div>
 
                   <label className="flex flex-col gap-2">
-                    <span className="text-sm font-medium text-slate-600">System prompt</span>
+                    <span className="text-sm font-medium text-slate-600">
+                      System prompt
+                    </span>
                     <textarea
                       name="system_prompt"
                       value={formValues.system_prompt}
@@ -682,7 +1039,9 @@ export default function AdminAgentsPage() {
               ) : null}
 
               {!agentDetailStatus.loading && !agentDetail?.agent ? (
-                <p className="text-sm text-slate-500">Select an agent from the list to begin editing.</p>
+                <p className="text-sm text-slate-500">
+                  Select an agent from the list to begin editing.
+                </p>
               ) : null}
             </section>
           </div>

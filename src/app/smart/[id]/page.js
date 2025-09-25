@@ -4,10 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Live2DContainer from "@/components/Live2DContainer";
 import ChatPanel from "@/components/chat/ChatPanel";
+import AgentRatingSummary from "@/components/AgentRatingSummary";
+import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+const API_BASE_URL = getApiBaseUrl();
 const YUMI_MODEL_URL = "/yumi/yumi.model3.json";
 
 export default function SmartPage() {
@@ -22,6 +23,12 @@ export default function SmartPage() {
     loading: false,
     error: null,
   });
+  const [ratingSummary, setRatingSummary] = useState({
+    average_score: 0,
+    rating_count: 0,
+  });
+  const ratingControllerRef = useRef(null);
+  const [ratingControllerReady, setRatingControllerReady] = useState(false);
 
   const live2DRef = useRef(null);
   const [live2DStatus, setLive2DStatus] = useState("init");
@@ -74,17 +81,82 @@ export default function SmartPage() {
   }, [agentId]);
 
   const agent = agentData?.agent ?? null;
+
+  useEffect(() => {
+    if (agent) {
+      const avgValue = Number(
+        agent?.average_rating ?? agent?.averageRating ?? 0,
+      );
+      const countValue = Number(agent?.rating_count ?? agent?.ratingCount ?? 0);
+      setRatingSummary({
+        average_score: Number.isFinite(avgValue)
+          ? Math.round(avgValue * 10) / 10
+          : 0,
+        rating_count:
+          Number.isFinite(countValue) && countValue > 0
+            ? Math.floor(countValue)
+            : 0,
+      });
+    } else {
+      setRatingSummary({
+        average_score: 0,
+        rating_count: 0,
+      });
+    }
+  }, [agent]);
+
+  const handleRatingSummaryChange = useCallback(
+    (summary) => {
+      const avgValue = Number(
+        summary?.average_score ?? summary?.averageScore ?? 0,
+      );
+      const countValue = Number(
+        summary?.rating_count ?? summary?.ratingCount ?? 0,
+      );
+      const normalized = {
+        average_score: Number.isFinite(avgValue)
+          ? Math.round(avgValue * 10) / 10
+          : 0,
+        rating_count:
+          Number.isFinite(countValue) && countValue > 0
+            ? Math.floor(countValue)
+            : 0,
+      };
+      setRatingSummary(normalized);
+      setAgentData((previous) => {
+        if (!previous?.agent) {
+          return previous;
+        }
+        return {
+          ...previous,
+          agent: {
+            ...previous.agent,
+            average_rating: normalized.average_score,
+            rating_count: normalized.rating_count,
+          },
+        };
+      });
+    },
+    [setAgentData],
+  );
+
+  const handleRatingControllerChange = useCallback((controller) => {
+    ratingControllerRef.current = controller;
+    setRatingControllerReady(Boolean(controller?.open));
+  }, []);
+
+  const handleOpenRatingModalFromHeader = useCallback(() => {
+    ratingControllerRef.current?.open?.();
+  }, []);
+
   const agentName = agent?.name ? agent.name : agentId || "Unknown";
   const agentDescription = useMemo(() => {
-    if (agent?.persona_desc) {
-      return agent.persona_desc;
+    const intro = agent?.one_sentence_intro ?? agent?.oneSentenceIntro ?? "";
+    if (typeof intro === "string" && intro.trim()) {
+      return intro.trim();
     }
-    if (agent?.first_turn_hint) {
-      return agent.first_turn_hint;
-    }
-    return "自定义智能体正在等待与您建立连接。";
-  }, [agent?.persona_desc, agent?.first_turn_hint]);
-
+    return "自动智能体正在等待主人的介绍。";
+  }, [agent?.one_sentence_intro, agent?.oneSentenceIntro]);
 
   const live2DModelRaw = agent?.live2d_model_id
     ? agent.live2d_model_id
@@ -109,12 +181,28 @@ export default function SmartPage() {
           <span className="text-sm uppercase tracking-wide text-gray-400">
             Smart Agent
           </span>
-          <h1 className="text-2xl font-semibold text-gray-900">
-            {agentName ? `智能体：${agentName}` : "智能体"}
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-2xl font-semibold text-gray-900">
+              {agentName ? `智能体：${agentName}` : "智能体"}
+            </h1>
+            <button
+              type="button"
+              onClick={handleOpenRatingModalFromHeader}
+              disabled={!ratingControllerReady}
+              className="rounded-full border border-amber-200 px-4 py-1.5 text-sm font-medium text-amber-600 transition hover:border-amber-300 hover:text-amber-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+            >
+              评价智能体
+            </button>
+          </div>
           <p className="text-sm text-gray-500">
             {agentStatus.error ? agentStatus.error : agentDescription}
           </p>
+          <AgentRatingSummary
+            average={ratingSummary.average_score}
+            count={ratingSummary.rating_count}
+            size="sm"
+            className="mt-2 w-fit"
+          />
         </header>
 
         <div className="flex flex-1 flex-col gap-6 lg:h-[720px] lg:flex-row">
@@ -131,7 +219,6 @@ export default function SmartPage() {
                 onStatusChange={handleLive2DStatusChange}
               />
             </div>
-
           </div>
 
           <div className="flex flex-1 min-h-0">
@@ -141,6 +228,10 @@ export default function SmartPage() {
               live2DRef={live2DRef}
               live2DStatus={live2DStatus}
               live2DError={live2DError}
+              ratingSummary={ratingSummary}
+              onRatingSummaryChange={handleRatingSummaryChange}
+              showRatingButton={false}
+              onRatingControllerChange={handleRatingControllerChange}
             />
           </div>
         </div>
@@ -148,4 +239,3 @@ export default function SmartPage() {
     </div>
   );
 }
-

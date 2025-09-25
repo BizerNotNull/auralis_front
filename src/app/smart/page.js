@@ -3,10 +3,11 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import AgentRatingSummary from "@/components/AgentRatingSummary";
+import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+const API_BASE_URL = getApiBaseUrl();
 const PAGE_SIZE = 6;
 
 function pickStoredToken() {
@@ -106,8 +107,12 @@ export default function AgentDirectoryPage() {
       <div className="mx-auto w-full max-w-6xl px-6">
         <header className="flex flex-col gap-4 border-b border-slate-200/70 pb-8 text-slate-700 md:flex-row md:items-end md:justify-between">
           <div className="space-y-2">
-            <p className="text-sm uppercase tracking-wide text-slate-400">Smart Agents</p>
-            <h1 className="text-3xl font-semibold text-slate-900">智能体总览</h1>
+            <p className="text-sm uppercase tracking-wide text-slate-400">
+              Smart Agents
+            </p>
+            <h1 className="text-3xl font-semibold text-slate-900">
+              智能体总览
+            </h1>
             <p className="max-w-2xl text-sm text-slate-500">
               使用本页面分页浏览所有已创建的智能体，提供头像预留位，方便后续为每位智能体上传专属形象。
             </p>
@@ -161,13 +166,23 @@ export default function AgentDirectoryPage() {
           <div className="mt-10 grid gap-6 md:grid-cols-2 xl:grid-cols-3">
             {pagedAgents.map((agent) => {
               const agentId = agent?.id ?? agent?.ID;
-              const persona = agent?.persona_desc ?? agent?.personaDesc ?? "";
-              const description = persona || agent?.first_turn_hint || agent?.opening_line || "";
+              const intro = agent?.one_sentence_intro ?? agent?.oneSentenceIntro ?? "";
+              const description =
+                typeof intro === "string" && intro.trim() ? intro.trim() : "暂无简介";
+              const averageRating = Number(
+                agent?.average_rating ?? agent?.averageRating ?? 0,
+              );
+              const ratingCount = Number(
+                agent?.rating_count ?? agent?.ratingCount ?? 0,
+              );
               let tags = [];
               try {
                 if (Array.isArray(agent?.tags)) {
                   tags = agent.tags;
-                } else if (typeof agent?.tags === "string" && agent.tags.trim()) {
+                } else if (
+                  typeof agent?.tags === "string" &&
+                  agent.tags.trim()
+                ) {
                   const parsed = JSON.parse(agent.tags);
                   if (Array.isArray(parsed)) {
                     tags = parsed;
@@ -177,7 +192,9 @@ export default function AgentDirectoryPage() {
                 console.warn("Failed to parse agent tags", error);
               }
 
-              const avatarUrl = resolveAssetUrl(agent?.avatar_url ?? agent?.avatarUrl ?? "");
+              const avatarUrl = resolveAssetUrl(
+                agent?.avatar_url ?? agent?.avatarUrl ?? "",
+              );
 
               return (
                 <article
@@ -213,12 +230,21 @@ export default function AgentDirectoryPage() {
                       </span>
                     </div>
 
+                    <AgentRatingSummary
+                      average={averageRating}
+                      count={ratingCount}
+                      size="sm"
+                      className="mt-3 w-fit"
+                    />
+
                     {description ? (
                       <p className="mt-3 text-sm text-slate-600">
                         {description}
                       </p>
                     ) : (
-                      <p className="mt-3 text-sm italic text-slate-400">暂无简介。</p>
+                      <p className="mt-3 text-sm italic text-slate-400">
+                        暂无简介。
+                      </p>
                     )}
 
                     {tags?.length ? (
@@ -235,8 +261,14 @@ export default function AgentDirectoryPage() {
                     ) : null}
 
                     <div className="mt-5 flex flex-col gap-2 text-xs text-slate-400">
-                      <span>创建时间：{formatDateTime(agent?.created_at ?? agent?.createdAt)}</span>
-                      <span>最近更新：{formatDateTime(agent?.updated_at ?? agent?.updatedAt)}</span>
+                      <span>
+                        创建时间：
+                        {formatDateTime(agent?.created_at ?? agent?.createdAt)}
+                      </span>
+                      <span>
+                        最近更新：
+                        {formatDateTime(agent?.updated_at ?? agent?.updatedAt)}
+                      </span>
                     </div>
 
                     <div className="mt-6 flex items-center justify-between">

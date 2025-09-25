@@ -1,22 +1,54 @@
 /* eslint-disable @next/next/no-img-element */
+
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+
+import { useRouter, useSearchParams } from "next/navigation";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
 import Live2DContainer from "@/components/Live2DContainer";
+
+import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+import {
+  FALLBACK_CHAT_MODELS,
+  findChatModel,
+  normalizeChatModels,
+  sortChatModels,
+} from "@/lib/chatModels";
+
+const API_BASE_URL = getApiBaseUrl();
 
 const DEFAULT_LIVE2D_MODEL = {
   id: "default-yumi",
+
   key: "default-yumi",
+
   name: "默认：Yumi",
+
   entry_url: "/yumi/yumi.model3.json",
+
   preview_url: "/yumi/yumi.png",
+
   storage_type: "local",
+};
+
+const INITIAL_FORM_VALUES = {
+  name: "",
+  one_sentence_intro: "",
+  persona_desc: "",
+  opening_line: "",
+  first_turn_hint: "",
+  model_provider: "openai",
+  model_name: "gpt-oss-120b",
+  temperature: "0.3",
+  max_tokens: "1024",
+  live2d_model_id: "",
+  avatar_url: "",
+  status: "",
 };
 
 function normalizeLive2DModels(list) {
@@ -25,9 +57,11 @@ function normalizeLive2DModels(list) {
   }
 
   return list
+
     .map((item) => {
       const entryUrl =
         typeof item?.entry_url === "string" ? item.entry_url.trim() : "";
+
       if (!entryUrl) {
         return null;
       }
@@ -36,12 +70,15 @@ function normalizeLive2DModels(list) {
         typeof item?.name === "string" && item.name.trim()
           ? item.name.trim()
           : entryUrl;
+
       const description =
         typeof item?.description === "string" && item.description.trim()
           ? item.description.trim()
           : undefined;
+
       const preview =
         typeof item?.preview_url === "string" ? item.preview_url.trim() : "";
+
       const storageType =
         typeof item?.storage_type === "string" && item.storage_type.trim()
           ? item.storage_type.trim()
@@ -49,58 +86,116 @@ function normalizeLive2DModels(list) {
 
       return {
         id: item?.id ?? item?.key ?? entryUrl,
+
         key: item?.key ?? null,
+
         name,
+
         description,
+
         entry_url: entryUrl,
+
         preview_url: preview,
+
         storage_type: storageType,
       };
     })
+
     .filter(Boolean);
 }
 
 function deriveHeaders(extra, options = {}) {
   const headers = new Headers(extra);
+
   headers.set("Accept", "application/json");
+
   if (options.contentType) {
     headers.set("Content-Type", options.contentType);
   }
+
   return headers;
+}
+
+function formatStatusLabel(status) {
+  if (!status) {
+    return "Unknown";
+  }
+  const trimmed = String(status).trim();
+  if (!trimmed) {
+    return "Unknown";
+  }
+  const lower = trimmed.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function statusBadgeClasses(status) {
+  switch ((status ?? "").toString().toLowerCase()) {
+    case "pending":
+      return "border-amber-200 bg-amber-50 text-amber-600";
+    case "active":
+      return "border-emerald-200 bg-emerald-50 text-emerald-600";
+    case "rejected":
+      return "border-rose-200 bg-rose-50 text-rose-600";
+    case "paused":
+      return "border-slate-200 bg-slate-100 text-slate-600";
+    case "archived":
+      return "border-slate-300 bg-slate-200 text-slate-500";
+    default:
+      return "border-slate-200 bg-slate-100 text-slate-500";
+  }
 }
 
 export default function CreateAgentPage() {
   const router = useRouter();
-  const [values, setValues] = useState({
-    name: "",
-    persona_desc: "",
-    opening_line: "",
-    first_turn_hint: "",
-    model_provider: "openai",
-    model_name: "gpt-oss-120b",
-    temperature: "0.3",
-    max_tokens: "1024",
-    live2d_model_id: "",
-  });
+  const searchParams = useSearchParams();
+  const editingAgentId = searchParams.get("agent");
+  const isEditing = Boolean(editingAgentId);
+
+  const [values, setValues] = useState(INITIAL_FORM_VALUES);
+
   const [submitting, setSubmitting] = useState(false);
+
   const [error, setError] = useState("");
+
   const [success, setSuccess] = useState(null);
+
+  const [loadingAgent, setLoadingAgent] = useState(false);
+
+  const [loadError, setLoadError] = useState("");
 
   const [avatarFile, setAvatarFile] = useState(null);
 
-  const [modelList, setModelList] = useState([]);
-  const [modelListStatus, setModelListStatus] = useState({
+  const [removeAvatar, setRemoveAvatar] = useState(false);
+
+  const [initialAgent, setInitialAgent] = useState(null);
+
+  const [chatModels, setChatModels] = useState(FALLBACK_CHAT_MODELS);
+
+  const [chatModelStatus, setChatModelStatus] = useState({
     loading: false,
+
     error: null,
   });
+
+  const [modelList, setModelList] = useState([]);
+
+  const [modelListStatus, setModelListStatus] = useState({
+    loading: false,
+
+    error: null,
+  });
+
   const live2DRef = useRef(null);
+
   const [live2DStatus, setLive2DStatus] = useState("init");
+
   const [live2DError, setLive2DError] = useState(null);
 
   const avatarPreviewUrl = useMemo(() => {
     if (!avatarFile) {
       return "";
     }
+
     return URL.createObjectURL(avatarFile);
   }, [avatarFile]);
 
@@ -114,34 +209,104 @@ export default function CreateAgentPage() {
 
   useEffect(() => {
     let aborted = false;
+
+    setChatModelStatus({ loading: true, error: null });
+
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/llm/models`, {
+          method: "GET",
+
+          headers: deriveHeaders(),
+
+          credentials: "include",
+
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error(`AI 模型列表请求失败：${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (aborted) {
+          return;
+        }
+
+        const list = normalizeChatModels(data?.models);
+
+        setChatModels(list.length ? list : FALLBACK_CHAT_MODELS);
+
+        setChatModelStatus({ loading: false, error: null });
+      } catch (error) {
+        if (aborted) {
+          return;
+        }
+
+        console.error(error);
+
+        setChatModels(FALLBACK_CHAT_MODELS);
+
+        setChatModelStatus({
+          loading: false,
+
+          error: error?.message ?? "加载 AI 模型列表失败",
+        });
+      }
+    })();
+
+    return () => {
+      aborted = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let aborted = false;
+
     setModelListStatus({ loading: true, error: null });
 
     (async () => {
       try {
         const response = await fetch(`${API_BASE_URL}/live2d/models`, {
           method: "GET",
+
           headers: deriveHeaders(),
+
           credentials: "include",
+
           cache: "no-store",
         });
+
         if (!response.ok) {
-          throw new Error(`Live2D models request failed with ${response.status}`);
+          throw new Error(
+            `Live2D models request failed with ${response.status}`,
+          );
         }
+
         const data = await response.json();
+
         if (aborted) {
           return;
         }
+
         const list = normalizeLive2DModels(data?.models);
+
         setModelList(list);
+
         setModelListStatus({ loading: false, error: null });
       } catch (error) {
         if (aborted) {
           return;
         }
+
         console.error(error);
+
         setModelList([]);
+
         setModelListStatus({
           loading: false,
+
           error: error?.message ?? "加载 Live2D 模型列表失败",
         });
       }
@@ -152,26 +317,194 @@ export default function CreateAgentPage() {
     };
   }, []);
 
+const populateFormFromAgent = useCallback(
+    (agent, config) => {
+      if (!agent) {
+        return;
+      }
+
+      let temperature = "";
+      let maxTokens = "";
+      const paramsRaw = config?.model_params ?? config?.modelParams;
+      if (paramsRaw) {
+        try {
+          const parsed =
+            typeof paramsRaw === "string" ? JSON.parse(paramsRaw) : paramsRaw;
+          if (parsed && typeof parsed === "object") {
+            if (parsed.temperature !== undefined) {
+              temperature = String(parsed.temperature);
+            }
+            if (parsed.max_tokens !== undefined) {
+              maxTokens = String(parsed.max_tokens);
+            }
+          }
+        } catch (parseError) {
+          console.warn("Failed to parse model params", parseError);
+        }
+      }
+
+      setValues((prev) => ({
+        ...prev,
+        name: agent?.name ?? "",
+        one_sentence_intro:
+          agent?.one_sentence_intro ?? agent?.oneSentenceIntro ?? "",
+        persona_desc: agent?.persona_desc ?? "",
+        opening_line: agent?.opening_line ?? "",
+        first_turn_hint: agent?.first_turn_hint ?? "",
+        model_provider: config?.model_provider ?? prev.model_provider,
+        model_name: config?.model_name ?? prev.model_name,
+        temperature: temperature || prev.temperature,
+        max_tokens: maxTokens || prev.max_tokens,
+        live2d_model_id: agent?.live2d_model_id ?? "",
+        avatar_url: agent?.avatar_url ?? prev.avatar_url ?? "",
+        status: agent?.status ?? prev.status ?? "",
+      }));
+      setInitialAgent(agent);
+      setAvatarFile(null);
+      setRemoveAvatar(false);
+    },
+    [setValues, setInitialAgent, setAvatarFile, setRemoveAvatar],
+  );
+
+  useEffect(() => {
+    if (!isEditing) {
+      setInitialAgent(null);
+      setLoadError("");
+      setLoadingAgent(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingAgent(true);
+    setLoadError("");
+    setError("");
+    setSuccess(null);
+
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/agents/${editingAgentId}`, {
+          method: "GET",
+          headers: deriveHeaders(),
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`加载智能体详情失败（${response.status}）`);
+        }
+        const data = await response.json();
+        if (cancelled) {
+          return;
+        }
+        const agent = data?.agent;
+        if (!agent) {
+          throw new Error("未找到智能体数据");
+        }
+
+        const config = data?.chat_config ?? data?.chatConfig ?? {};
+        populateFormFromAgent(agent, config);
+      } catch (fetchError) {
+        if (!cancelled) {
+          console.error(fetchError);
+          setLoadError(fetchError?.message ?? "加载智能体失败");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingAgent(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isEditing, editingAgentId, populateFormFromAgent]);
+
   const availableModels = useMemo(() => {
     const combined = [DEFAULT_LIVE2D_MODEL, ...modelList];
+
     const unique = [];
+
     const seen = new Set();
 
     for (const item of combined) {
       if (!item) {
         continue;
       }
+
       const entry =
         typeof item.entry_url === "string" ? item.entry_url.trim() : "";
+
       if (!entry || seen.has(entry)) {
         continue;
       }
+
       seen.add(entry);
+
       unique.push(item);
     }
 
     return unique;
   }, [modelList]);
+
+  
+  const chatModelOptions = useMemo(
+    () => sortChatModels(chatModels),
+
+    [chatModels],
+  );
+
+  useEffect(() => {
+    if (!chatModelOptions.length) {
+      return;
+    }
+
+    const matched = findChatModel(
+      chatModelOptions,
+      values.model_provider,
+      values.model_name,
+    );
+    if (matched) {
+      return;
+    }
+
+    const fallback = chatModelOptions[0];
+    if (!fallback) {
+      return;
+    }
+
+    setValues((prev) => {
+      if (
+        prev.model_provider === fallback.provider &&
+        prev.model_name === fallback.name
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        model_provider: fallback.provider,
+        model_name: fallback.name,
+      };
+    });
+  }, [chatModelOptions, setValues, values.model_name, values.model_provider]);
+
+  const selectedChatModel = useMemo(
+    () =>
+      findChatModel(
+        chatModelOptions,
+
+        values.model_provider,
+
+        values.model_name,
+      ),
+
+    [chatModelOptions, values.model_provider, values.model_name],
+  );
+
+  const chatModelSelectValue = selectedChatModel?.key ?? "";
+
+  const chatModelDescription = selectedChatModel?.description ?? "";
+
+  const chatModelCapabilities = selectedChatModel?.capabilities ?? [];
 
   const selectedModelUrl = (values.live2d_model_id ?? "").trim();
 
@@ -179,6 +512,7 @@ export default function CreateAgentPage() {
     if (!selectedModelUrl && availableModels.length > 0) {
       setValues((prev) => ({
         ...prev,
+
         live2d_model_id: availableModels[0].entry_url,
       }));
     }
@@ -188,6 +522,7 @@ export default function CreateAgentPage() {
     if (!selectedModelUrl) {
       return null;
     }
+
     return (
       availableModels.find(
         (model) => (model.entry_url ?? "").trim() === selectedModelUrl,
@@ -196,23 +531,33 @@ export default function CreateAgentPage() {
   }, [availableModels, selectedModelUrl]);
 
   const previewModelUrl = selectedModel?.entry_url ?? "";
+
   const resolvedModelUrl = previewModelUrl
     ? resolveAssetUrl(previewModelUrl)
     : "";
+
   const previewImageUrl = selectedModel?.preview_url ?? "";
+
   const previewImageSrc = previewImageUrl
     ? resolveAssetUrl(previewImageUrl)
     : "";
+
+  const displayAvatarUrl = removeAvatar ? "" : values.avatar_url;
+  const currentStatus = initialAgent?.status ?? values.status ?? "";
+
   const selectedModelDescription = selectedModel?.description ?? "";
 
   const live2DStatusLabel = useMemo(() => {
     switch (live2DStatus) {
       case "loading":
         return "模型加载中...";
+
       case "ready":
         return "模型预览已就绪";
+
       case "error":
         return "模型加载失败";
+
       default:
         return "等待选择模型";
     }
@@ -220,31 +565,67 @@ export default function CreateAgentPage() {
 
   useEffect(() => {
     setLive2DStatus("init");
+
     setLive2DError(null);
   }, [resolvedModelUrl]);
+
+  const handleChatModelPresetChange = useCallback(
+    (event) => {
+      const key = event.target.value;
+
+      if (!key) {
+        return;
+      }
+
+      const [providerRaw, nameRaw] = key.split(":::", 2);
+
+      const provider = (providerRaw ?? "").trim();
+
+      const modelName = (nameRaw ?? "").trim();
+
+      if (!provider || !modelName) {
+        return;
+      }
+
+      setValues((prev) => ({
+        ...prev,
+
+        model_provider: provider,
+
+        model_name: modelName,
+      }));
+    },
+
+    [setValues],
+  );
 
   const handleModelSelect = useCallback(
     (entryUrl) => {
       setValues((prev) => ({
         ...prev,
+
         live2d_model_id: entryUrl,
       }));
     },
+
     [setValues],
   );
 
   const handleLive2DStatusChange = useCallback((status, message) => {
     setLive2DStatus(status);
+
     setLive2DError(message ?? null);
   }, []);
 
   const handleChange = (event) => {
     const { name, value } = event.target;
+
     setValues((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleAvatarChange = (event) => {
     const file = event.target?.files?.[0];
+
     if (file) {
       setAvatarFile(file);
     } else {
@@ -254,34 +635,52 @@ export default function CreateAgentPage() {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+
+    if (isEditing && !editingAgentId) {
+      return;
+    }
+
     setError("");
     setSuccess(null);
+    setLoadError("");
     setSubmitting(true);
 
     try {
       const formData = new FormData();
+
       formData.append("name", values.name.trim());
+
+      if (values.one_sentence_intro.trim()) {
+        formData.append("one_sentence_intro", values.one_sentence_intro.trim());
+      }
 
       if (values.persona_desc.trim()) {
         formData.append("persona_desc", values.persona_desc.trim());
       }
+
       if (values.opening_line.trim()) {
         formData.append("opening_line", values.opening_line.trim());
       }
+
       if (values.first_turn_hint.trim()) {
         formData.append("first_turn_hint", values.first_turn_hint.trim());
       }
 
-      const provider = values.model_provider.trim() || "openai";
-      const modelName = values.model_name.trim() || "gpt-oss-120b";
+      const provider = values.model_provider.trim();
+      const modelName = values.model_name.trim();
+      if (!provider || !modelName) {
+        throw new Error("请先选择 AI 模型");
+      }
+
       formData.append("model_provider", provider);
       formData.append("model_name", modelName);
 
       const temperature = Number(values.temperature);
-      const maxTokens = Number(values.max_tokens);
       if (!Number.isNaN(temperature)) {
         formData.append("temperature", String(temperature));
       }
+
+      const maxTokens = Number(values.max_tokens);
       if (!Number.isNaN(maxTokens) && maxTokens > 0) {
         formData.append("max_tokens", String(maxTokens));
       }
@@ -289,38 +688,78 @@ export default function CreateAgentPage() {
       if (avatarFile) {
         formData.append("avatar", avatarFile);
       }
+
+      if (isEditing && removeAvatar) {
+        formData.append("remove_avatar", "true");
+      }
+
       if (values.live2d_model_id && values.live2d_model_id.trim()) {
         formData.append("live2d_model_id", values.live2d_model_id.trim());
       }
 
-      const response = await fetch(`${API_BASE_URL}/agents`, {
-        method: "POST",
+      const endpoint = isEditing
+        ? `${API_BASE_URL}/agents/${editingAgentId}`
+        : `${API_BASE_URL}/agents`;
+
+      const response = await fetch(endpoint, {
+        method: isEditing ? "PUT" : "POST",
         headers: deriveHeaders(),
         credentials: "include",
         body: formData,
       });
 
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || `Create agent failed with ${response.status}`);
+        const textBody = await response.text();
+        const message =
+          textBody ||
+          (isEditing
+            ? `Update agent failed with ${response.status}`
+            : `Create agent failed with ${response.status}`);
+        throw new Error(message);
       }
 
       const data = await response.json();
-      setSuccess({
-        id: data?.agent?.id,
-        name: data?.agent?.name,
-      });
-      setAvatarFile(null);
-      setValues((prev) => ({
-        ...prev,
-        name: "",
-        persona_desc: "",
-        opening_line: "",
-        first_turn_hint: "",
-      }));
+      const agent = data?.agent;
+      const config = data?.chat_config ?? data?.chatConfig ?? {};
+
+      if (isEditing) {
+        populateFormFromAgent(agent ?? initialAgent, config);
+        const updatedStatus = agent?.status ?? initialAgent?.status ?? "";
+        setSuccess({
+          id: agent?.id ?? initialAgent?.id ?? editingAgentId,
+          name: agent?.name ?? initialAgent?.name ?? values.name,
+          status: updatedStatus,
+          mode: "edit",
+        });
+        setLoadError("");
+      } else {
+        setSuccess({
+          id: agent?.id,
+          name: agent?.name,
+          status: agent?.status ?? "",
+          mode: "create",
+        });
+        setInitialAgent(agent ?? null);
+        setAvatarFile(null);
+        setRemoveAvatar(false);
+        setLoadError("");
+        setValues((prev) => ({
+          ...prev,
+          name: "",
+          one_sentence_intro: "",
+          persona_desc: "",
+          opening_line: "",
+          first_turn_hint: "",
+          avatar_url: "",
+          status: agent?.status ?? "",
+        }));
+      }
     } catch (caught) {
       console.error(caught);
-      setError(caught?.message ?? "Failed to create agent");
+      setError(
+        caught?.message ??
+          (isEditing ? "Failed to update agent" : "Failed to create agent"),
+      );
     } finally {
       setSubmitting(false);
     }
@@ -331,23 +770,54 @@ export default function CreateAgentPage() {
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-8 px-6">
         <div className="flex flex-col gap-3 text-slate-700 sm:flex-row sm:items-end sm:justify-between">
           <div>
-
             <h1 className="text-2xl font-semibold text-slate-900">
-              创建智能体
+              {isEditing ? "编辑智能体" : "创建智能体"}
             </h1>
 
             <p className="mt-1 text-sm text-slate-500">
-              配置基础信息和大模型参数，快速生成一个新的虚拟助手。
+              {isEditing
+                ? "更新智能体信息后需要等待审核通过才会重新对外展示。"
+                : "填写角色信息和模型配置，创建全新的智能体。"}
             </p>
+            {isEditing ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span
+                  className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClasses(
+                    currentStatus
+                  )}`}
+                >
+                  当前状态：{formatStatusLabel(currentStatus)}
+                </span>
+                {initialAgent?.id ? (
+                  <span className="text-[11px] text-slate-400">
+                    ID: {initialAgent.id}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
-          <Link
-            href={`/smart/${success?.id ?? ""}`}
-            className="text-sm text-blue-500 hover:text-blue-600"
-          >
-            {success?.id ? "查看智能体" : "返回聊天"}
-          </Link>
+          {success?.id ? (
+            <Link
+              href={`/smart/${success.id}`}
+              className="text-sm text-blue-500 hover:text-blue-600"
+            >
+              查看智能体
+            </Link>
+          ) : null}
         </div>
+
+        {isEditing && loadingAgent ? (
+          <p className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-600">
+            正在加载智能体详情...
+          </p>
+        ) : null}
+
+        {loadError ? (
+          <p className="rounded-2xl border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">
+            {loadError}
+          </p>
+        ) : null}
 
         <div className="flex flex-col gap-8 lg:flex-row">
           <div className="flex justify-center lg:w-[420px]">
@@ -356,12 +826,14 @@ export default function CreateAgentPage() {
                 <span className="text-base font-semibold text-slate-800">
                   {selectedModel?.name ?? "Live2D 模型"}
                 </span>
+
                 {selectedModelDescription ? (
                   <span className="line-clamp-3 text-xs text-slate-500">
                     {selectedModelDescription}
                   </span>
                 ) : null}
               </div>
+
               <div className="w-full rounded-2xl border border-slate-200/70 bg-white/70 p-3 shadow-inner">
                 <Live2DContainer
                   key={resolvedModelUrl || "live2d-empty"}
@@ -373,14 +845,17 @@ export default function CreateAgentPage() {
                   onStatusChange={handleLive2DStatusChange}
                 />
               </div>
+
               {live2DError ? (
                 <p className="text-xs text-red-500">{live2DError}</p>
               ) : (
                 <p className="text-xs text-slate-500">{live2DStatusLabel}</p>
               )}
+
               {previewImageSrc ? (
                 <div className="w-full rounded-xl bg-white/80 p-2 text-center">
                   <span className="text-[11px] text-slate-400">静态预览</span>
+
                   <img
                     src={previewImageSrc}
                     alt={`${selectedModel?.name ?? "Live2D"} 静态预览`}
@@ -396,32 +871,59 @@ export default function CreateAgentPage() {
             <form className="space-y-6" onSubmit={handleSubmit}>
               <label className="flex flex-col gap-2">
                 <span className="text-sm font-medium text-slate-600">头像</span>
+
                 <input
                   type="file"
                   accept="image/*"
                   onChange={handleAvatarChange}
                   className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
                 />
-                {avatarPreviewUrl ? (
-                  <img
-                    src={avatarPreviewUrl}
-                    alt="新头像预览"
-                    className="mt-2 h-24 w-24 rounded-full object-cover shadow"
-                  />
-                ) : (
-                  <p className="mt-1 text-xs text-slate-400">
-                    支持 JPG、PNG、GIF、WebP，建议尺寸不超过 5 MB。
-                  </p>
-                )}
-                {avatarFile ? (
-                  <button
-                    type="button"
-                    onClick={() => setAvatarFile(null)}
-                    className="mt-2 w-fit rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-500 transition hover:border-red-300 hover:text-red-500"
-                  >
-                    移除已选择的头像
-                  </button>
-                ) : null}
+
+                <div className="mt-2 flex flex-col gap-2">
+                  {avatarPreviewUrl ? (
+                    <img
+                      src={avatarPreviewUrl}
+                      alt="头像预览"
+                      className="h-24 w-24 rounded-full object-cover shadow"
+                    />
+                  ) : displayAvatarUrl ? (
+                    <img
+                      src={resolveAssetUrl(displayAvatarUrl)}
+                      alt="当前头像"
+                      className="h-24 w-24 rounded-full object-cover shadow"
+                    />
+                  ) : (
+                    <p className="text-xs text-slate-400">
+                      支持 JPG、PNG、GIF 或 WebP，大小不超过 5 MB。
+                    </p>
+                  )}
+
+                  {avatarFile ? (
+                    <button
+                  type="submit"
+                  disabled={submitting || (isEditing && loadingAgent)}
+                  className="rounded-full bg-blue-500 px-5 py-2 text-sm font-medium text-white shadow transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-blue-300"
+                >
+                  {submitting
+                    ? isEditing
+                      ? "保存中..."
+                      : "创建中..."
+                    : isEditing
+                    ? "保存修改"
+                    : "创建智能体"}
+                </button>
+                  ) : null}
+
+                  {isEditing && (displayAvatarUrl || avatarPreviewUrl) ? (
+                    <button
+                      type="button"
+                      onClick={() => setRemoveAvatar((prev) => !prev)}
+                      className="w-fit rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-500 transition hover:border-red-300 hover:text-red-500"
+                    >
+                      {removeAvatar ? "撤销移除头像" : "移除当前头像"}
+                    </button>
+                  ) : null}
+                </div>
               </label>
 
               <section className="space-y-3">
@@ -429,26 +931,35 @@ export default function CreateAgentPage() {
                   <span className="text-sm font-medium text-slate-600">
                     选择 Live2D 模型
                   </span>
+
                   {modelListStatus.loading ? (
                     <span className="text-xs text-slate-400">加载中...</span>
                   ) : modelListStatus.error ? (
-                    <span className="text-xs text-red-500">{modelListStatus.error}</span>
+                    <span className="text-xs text-red-500">
+                      {modelListStatus.error}
+                    </span>
                   ) : (
                     <span className="text-xs text-slate-400">
                       {availableModels.length} 个可用
                     </span>
                   )}
                 </div>
+
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                   {availableModels.length ? (
                     availableModels.map((model) => {
                       const entry = (model.entry_url ?? "").trim();
+
                       const active = entry === selectedModelUrl;
+
                       const cover =
-                        typeof model.preview_url === "string" && model.preview_url.trim()
+                        typeof model.preview_url === "string" &&
+                        model.preview_url.trim()
                           ? resolveAssetUrl(model.preview_url)
                           : "";
+
                       const description = model.description ?? "";
+
                       return (
                         <button
                           key={model.id ?? entry}
@@ -475,17 +986,20 @@ export default function CreateAgentPage() {
                               </div>
                             )}
                           </div>
+
                           <div className="mt-2 flex items-start justify-between gap-2">
                             <div className="flex flex-1 flex-col">
                               <span className="text-sm font-medium text-slate-700">
                                 {model.name}
                               </span>
+
                               {description ? (
                                 <span className="mt-1 line-clamp-2 text-xs text-slate-500">
                                   {description}
                                 </span>
                               ) : null}
                             </div>
+
                             {active ? (
                               <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-xs font-semibold text-blue-600">
                                 已选
@@ -503,11 +1017,74 @@ export default function CreateAgentPage() {
                 </div>
               </section>
 
+              <section className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-slate-600">
+                    选择 AI 模型
+                  </span>
+                  {chatModelStatus.loading ? (
+                    <span className="text-xs text-slate-400">加载中...</span>
+                  ) : chatModelStatus.error ? (
+                    <span className="text-xs text-amber-500">
+                      {chatModelStatus.error}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-slate-400">
+                      {chatModelOptions.length} 个可选
+                    </span>
+                  )}
+                </div>
+                <select
+                  value={chatModelSelectValue}
+                  onChange={handleChatModelPresetChange}
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                >
+                  <option value="" disabled>
+                    请选择一个可用模型
+                  </option>
+                  {chatModelOptions.map((model) => (
+                    <option key={model.key} value={model.key}>
+                      {model.displayName} · {model.providerLabel}
+                      {model.recommended ? "（推荐）" : ""}
+                    </option>
+                  ))}
+                </select>
+                {selectedChatModel ? (
+                  <div className="text-xs text-slate-500">
+                    {chatModelDescription ? (
+                      <p>{chatModelDescription}</p>
+                    ) : null}
+                    {chatModelCapabilities.length ? (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {chatModelCapabilities.map((capability) => (
+                          <span
+                            key={`${selectedChatModel?.key ?? "preset"}-${capability}`}
+                            className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600"
+                          >
+                            {capability}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="text-xs text-amber-600">
+                    请选择上方的模型后再提交。
+                  </p>
+                )}
+              </section>
+              <p className="text-xs text-slate-400">
+                当前将使用：{values.model_provider || "未选择"} /{" "}
+                {values.model_name || "未选择"}
+              </p>
+
               <div className="grid gap-4 md:grid-cols-2">
+                
                 <label className="flex flex-col gap-2">
                   <span className="text-sm font-medium text-slate-600">
                     智能体名称 *
                   </span>
+
                   <input
                     name="name"
                     value={values.name}
@@ -523,6 +1100,7 @@ export default function CreateAgentPage() {
                   <span className="text-sm font-medium text-slate-600">
                     开场话术
                   </span>
+
                   <input
                     name="opening_line"
                     value={values.opening_line}
@@ -536,64 +1114,56 @@ export default function CreateAgentPage() {
 
               <label className="flex flex-col gap-2">
                 <span className="text-sm font-medium text-slate-600">
-                  人格/角色设定
+                  一句话介绍
                 </span>
+
+                <textarea
+                  name="one_sentence_intro"
+                  value={values.one_sentence_intro}
+                  onChange={handleChange}
+                  rows={2}
+                  maxLength={200}
+                  className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  placeholder="请用一句话概括智能体的亮点，让用户一眼了解TA"
+                />
+              </label>
+
+              <label className="flex flex-col gap-2">
+                <span className="text-sm font-medium text-slate-600">
+                  人设/角色设定
+                </span>
+
                 <textarea
                   name="persona_desc"
                   value={values.persona_desc}
                   onChange={handleChange}
                   rows={4}
                   className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                  placeholder="描述智能体的语气、背景、能力等"
+                  placeholder="请用详细的描述刻画出智能体的性格、背景与语言习惯"
                 />
               </label>
 
               <label className="flex flex-col gap-2">
-                <span className="text-sm font-medium text-slate-600">对话提示</span>
+                <span className="text-sm font-medium text-slate-600">
+                  对话提示
+                </span>
+
                 <textarea
                   name="first_turn_hint"
                   value={values.first_turn_hint}
                   onChange={handleChange}
                   rows={3}
                   className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                  placeholder="针对首轮对话的补充提示"
+                  placeholder="建议用户在开始对话时的引导语"
                 />
               </label>
 
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="flex flex-col gap-2">
                   <span className="text-sm font-medium text-slate-600">
-                    模型提供方 *
-                  </span>
-                  <input
-                    name="model_provider"
-                    value={values.model_provider}
-                    onChange={handleChange}
-                    required
-                    className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                    placeholder="openai"
-                  />
-                </label>
-                <label className="flex flex-col gap-2">
-                  <span className="text-sm font-medium text-slate-600">
-                    模型名称 *
-                  </span>
-                  <input
-                    name="model_name"
-                    value={values.model_name}
-                    onChange={handleChange}
-                    required
-                    className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                    placeholder="gpt-4o-mini"
-                  />
-                </label>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="flex flex-col gap-2">
-                  <span className="text-sm font-medium text-slate-600">
                     温度 (0-2)
                   </span>
+
                   <input
                     name="temperature"
                     value={values.temperature}
@@ -602,10 +1172,12 @@ export default function CreateAgentPage() {
                     placeholder="0.3"
                   />
                 </label>
+
                 <label className="flex flex-col gap-2">
                   <span className="text-sm font-medium text-slate-600">
                     最大输出 Token
                   </span>
+
                   <input
                     name="max_tokens"
                     value={values.max_tokens}
@@ -624,14 +1196,31 @@ export default function CreateAgentPage() {
 
               {success ? (
                 <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-600">
-                  智能体创建成功，编号 {success.id}。
-                  <button
-                    type="button"
-                    className="ml-2 font-semibold text-emerald-700 underline"
-                    onClick={() => router.push(`/smart/${success.id}`)}
-                  >
-                    前往聊天
-                  </button>
+                  <p>
+                    {success.mode === "edit"
+                      ? "已保存修改。"
+                      : `智能体创建成功，编号 ${success.id ?? "--"}。`}
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    {success.status ? (
+                      <span
+                        className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClasses(
+                          success.status
+                        )}`}
+                      >
+                        状态：{formatStatusLabel(success.status)}
+                      </span>
+                    ) : null}
+                    {success.id ? (
+                      <button
+                        type="button"
+                        className="rounded-full border border-emerald-300 px-3 py-1 text-xs font-semibold text-emerald-700 transition hover:border-emerald-400 hover:text-emerald-800"
+                        onClick={() => router.push(`/smart/${success.id}`)}
+                      >
+                        前往查看
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               ) : null}
 
@@ -642,6 +1231,7 @@ export default function CreateAgentPage() {
                 >
                   返回首页
                 </Link>
+
                 <button
                   type="submit"
                   disabled={submitting}
@@ -654,8 +1244,6 @@ export default function CreateAgentPage() {
           </div>
         </div>
       </div>
-
     </div>
   );
 }
-
