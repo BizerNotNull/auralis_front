@@ -22,7 +22,9 @@ function resolveRequestOrigin(headerList) {
   const forwardedProto = headerList.get("x-forwarded-proto");
   const protocol =
     forwardedProto?.split(",")[0]?.trim() ??
-    (host.startsWith("localhost") || host.startsWith("127.0.0.1") ? "http" : "https");
+    (host.startsWith("localhost") || host.startsWith("127.0.0.1")
+      ? "http"
+      : "https");
   return `${protocol}://${host}`;
 }
 
@@ -34,7 +36,8 @@ function normalizeBaseUrl(candidate, headerList) {
 
   try {
     const url = new URL(value);
-    const normalizedPath = url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
+    const normalizedPath =
+      url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
     return `${url.origin}${normalizedPath}`;
   } catch (error) {
     // fall through
@@ -52,7 +55,10 @@ function normalizeBaseUrl(candidate, headerList) {
   }
 
   if (/^[\w.-]+(:\d+)?(\/.*)?$/.test(value)) {
-    const protocol = value.startsWith("localhost") || value.startsWith("127.0.0.1") ? "http" : "https";
+    const protocol =
+      value.startsWith("localhost") || value.startsWith("127.0.0.1")
+        ? "http"
+        : "https";
     return `${protocol}://${value}`.replace(/\/$/, "");
   }
 
@@ -118,7 +124,6 @@ function isSameOrigin(target, origin) {
   }
 }
 
-
 function serializeCookies(entries) {
   if (!Array.isArray(entries) || !entries.length) {
     return "";
@@ -134,7 +139,13 @@ function extractUserPayload(payload) {
   if (nested && typeof nested === "object") {
     return nested;
   }
-  const indicativeKeys = ["id", "username", "display_name", "displayName"];
+  const indicativeKeys = [
+    "id",
+    "username",
+    "nickname",
+    "display_name",
+    "displayName",
+  ];
   if (indicativeKeys.some((key) => key in payload)) {
     return payload;
   }
@@ -210,7 +221,11 @@ async function fetchAgents(apiBaseUrl, token) {
     if (token) {
       headers.set("Authorization", `Bearer ${token}`);
     }
-    const response = await fetch(buildEndpoint(apiBaseUrl, "/agents"), {
+    const endpoint = new URL(buildEndpoint(apiBaseUrl, "/agents"));
+    endpoint.searchParams.set("sort", "hot");
+    endpoint.searchParams.set("limit", "6");
+
+    const response = await fetch(endpoint.toString(), {
       method: "GET",
       headers,
       cache: "no-store",
@@ -227,13 +242,9 @@ async function fetchAgents(apiBaseUrl, token) {
 }
 
 function formatAgentDescription(agent) {
-  const persona = agent?.persona_desc ?? agent?.personaDesc ?? "";
-  if (typeof persona === "string" && persona.trim()) {
-    return persona.trim();
-  }
-  const hint = agent?.opening_line ?? agent?.openingLine ?? "";
-  if (typeof hint === "string" && hint.trim()) {
-    return hint.trim();
+  const intro = agent?.one_sentence_intro ?? agent?.oneSentenceIntro ?? "";
+  if (typeof intro === "string" && intro.trim()) {
+    return intro.trim();
   }
   return "暂无简介";
 }
@@ -253,7 +264,12 @@ export default async function Home() {
   ]);
 
   const loggedIn = Boolean(user);
-  const displayName = (user?.display_name ?? user?.username ?? "").trim();
+  const displayName = (
+    user?.nickname ??
+    user?.display_name ??
+    user?.username ??
+    ""
+  ).trim();
   const headerDisplayName = displayName || "我的主页";
   const avatarUrl = typeof user?.avatar_url === "string" ? user.avatar_url : "";
   const visibleAgents = agents.slice(0, 6);
@@ -263,8 +279,16 @@ export default async function Home() {
       <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-8">
         <header className="flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3">
-            <Image src="/next.svg" alt="Auralis" width={120} height={28} priority />
-            <span className="hidden text-lg font-semibold sm:inline">Auralis 智能体平台</span>
+            <Image
+              src="/next.svg"
+              alt="Auralis"
+              width={120}
+              height={28}
+              priority
+            />
+            <span className="hidden text-lg font-semibold sm:inline">
+              Auralis 智能体平台
+            </span>
           </Link>
 
           <nav className="hidden items-center gap-6 text-sm font-medium text-slate-600 sm:flex">
@@ -274,6 +298,11 @@ export default async function Home() {
             <Link href="/smart/create" className="hover:text-slate-900">
               创建智能体
             </Link>
+            {loggedIn ? (
+              <Link href="/smart/mine" className="hover:text-slate-900">
+                我的智能体
+              </Link>
+            ) : null}
           </nav>
 
           <div className="flex items-center gap-3">
@@ -318,13 +347,16 @@ export default async function Home() {
           <section className="grid items-center gap-12 py-16 md:grid-cols-2">
             <div className="space-y-6">
               <p className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-4 py-1 text-xs font-medium text-blue-600">
-                {loggedIn ? `欢迎回来，${headerDisplayName}` : "多模态智能体协作"}
+                {loggedIn
+                  ? `欢迎回来，${headerDisplayName}`
+                  : "多模态智能体协作"}
               </p>
               <h1 className="text-4xl font-bold leading-tight tracking-tight text-slate-900 sm:text-5xl">
                 机械的心率带动血肉的共鸣
               </h1>
               <p className="text-base text-slate-600">
-                在 Auralis，配置属于自己的个性化智能体，结合 Live2D 表演、语音交互与多模态能力，随时与其他人分享。
+                在 Auralis，配置属于自己的个性化智能体，结合 Live2D
+                表演、语音交互与多模态能力，随时与其他人分享。
               </p>
               <div className="flex flex-wrap gap-4">
                 {loggedIn ? null : (
@@ -364,7 +396,9 @@ export default async function Home() {
           <section className="mt-8 rounded-3xl border border-slate-200 bg-white/80 p-8 shadow-xl backdrop-blur">
             <div className="flex flex-col gap-3 border-b border-slate-200 pb-6 md:flex-row md:items-center md:justify-between">
               <div>
-                <h2 className="text-2xl font-semibold text-slate-900">当前智能体</h2>
+                <h2 className="text-2xl font-semibold text-slate-900">
+                  当前智能体
+                </h2>
                 <p className="text-sm text-slate-500">
                   {loggedIn
                     ? "探索你的专属智能体，与更多角色建立协作"
@@ -385,11 +419,25 @@ export default async function Home() {
               visibleAgents.length ? (
                 <div className="mt-6 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
                   {visibleAgents.map((agent) => {
-                    const agentId = agent?.id ?? agent?.agent_id ?? Math.random();
+                    const agentId =
+                      agent?.id ?? agent?.agent_id ?? Math.random();
                     const name = agent?.name ?? `智能体 ${agentId}`;
                     const status = agent?.status ?? "active";
                     const description = formatAgentDescription(agent);
-                    const avatar = resolveAssetUrl(agent?.avatar_url ?? agent?.avatarUrl ?? "");
+                    const avatar = resolveAssetUrl(
+                      agent?.avatar_url ?? agent?.avatarUrl ?? "",
+                    );
+                    const averageRating = Number(
+                      agent?.average_rating ?? agent?.averageRating ?? 0,
+                    );
+                    const ratingCount = Number(
+                      agent?.rating_count ?? agent?.ratingCount ?? 0,
+                    );
+                    const hasRatings =
+                      Number.isFinite(averageRating) && ratingCount > 0;
+                    const displayAverage = hasRatings
+                      ? Math.round(averageRating * 10) / 10
+                      : 0;
 
                     return (
                       <article
@@ -409,11 +457,55 @@ export default async function Home() {
                             </span>
                           )}
                           <div>
-                            <h3 className="text-lg font-semibold text-slate-900">{name}</h3>
-                            <p className="text-xs text-slate-400">状态：{status}</p>
+                            <h3 className="text-lg font-semibold text-slate-900">
+                              {name}
+                            </h3>
+                            <p className="text-xs text-slate-400">
+                              状态：{status}
+                            </p>
                           </div>
                         </div>
-                        <p className="flex-1 text-sm text-slate-600">{description}</p>
+                        <div className="mt-2">
+                          {hasRatings ? (
+                            <span
+                              className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-600"
+                              title={`平均评分 ${displayAverage.toFixed(1)}，共有 ${ratingCount} 条评价`}
+                            >
+                              <svg
+                                viewBox="0 0 24 24"
+                                className="h-4 w-4 text-amber-500"
+                                fill="currentColor"
+                                aria-hidden
+                              >
+                                <path d="M12 2.5l2.89 6.02 6.67.55-5.04 4.46 1.5 6.47L12 16.96l-6.02 3.04 1.5-6.47-5.04-4.46 6.67-.55L12 2.5z" />
+                              </svg>
+                              <span className="font-semibold">
+                                {displayAverage.toFixed(1)}
+                              </span>
+                              <span className="text-[10px] text-amber-500/80">
+                                {ratingCount} 条评分
+                              </span>
+                            </span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1.5 rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-400"
+                              title="暂无评分"
+                            >
+                              <svg
+                                viewBox="0 0 24 24"
+                                className="h-4 w-4 text-gray-300"
+                                fill="currentColor"
+                                aria-hidden
+                              >
+                                <path d="M12 2.5l2.89 6.02 6.67.55-5.04 4.46 1.5 6.47L12 16.96l-6.02 3.04 1.5-6.47-5.04-4.46 6.67-.55L12 2.5z" />
+                              </svg>
+                              <span className="font-medium">暂无评分</span>
+                            </span>
+                          )}
+                        </div>
+                        <p className="flex-1 text-sm text-slate-600">
+                          {description}
+                        </p>
                         <div className="mt-auto">
                           <Link
                             href={`/smart/${agentId}`}
@@ -428,24 +520,38 @@ export default async function Home() {
                 </div>
               ) : (
                 <div className="mt-6 rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 p-8 text-center text-slate-500">
-                  暂无可用智能体，去 <Link href="/smart/create" className="text-blue-500 hover:text-blue-600">创建一个</Link> 吧。
+                  暂无可用智能体，去{" "}
+                  <Link
+                    href="/smart/create"
+                    className="text-blue-500 hover:text-blue-600"
+                  >
+                    创建一个
+                  </Link>{" "}
+                  吧。
                 </div>
               )
             ) : (
               <div className="mt-6 rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 p-8 text-center text-slate-500">
-                登录解锁属于你的智能体，<Link href="/login" className="text-blue-500 hover:text-blue-600">立即登录</Link>。
+                登录解锁属于你的智能体，
+                <Link
+                  href="/login"
+                  className="text-blue-500 hover:text-blue-600"
+                >
+                  立即登录
+                </Link>
+                。
               </div>
             )}
           </section>
         </main>
 
         <footer className="mt-12 border-t border-slate-200 pt-6 text-sm text-slate-500">
-          <p>Copyright {new Date().getFullYear()} Auralis By Bizer. 保留所有权利。</p>
+          <p>
+            Copyright {new Date().getFullYear()} Auralis By Bizer.
+            保留所有权利。
+          </p>
         </footer>
       </div>
     </div>
   );
 }
-
-
-

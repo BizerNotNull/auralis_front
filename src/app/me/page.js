@@ -2,16 +2,24 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE_URL = "/api/auth";
+const TOKEN_STORAGE_KEYS = ["access_token", "token", "authToken", "jwt"];
+
+const ROLE_LABELS = {
+  admin: "\u7BA1\u7406\u5458",
+  staff: "\u56E2\u961F\u6210\u5458",
+  user: "\u666E\u901A\u7528\u6237",
+};
+
 
 function pickStoredToken() {
   if (typeof window === "undefined") {
     return null;
   }
-  const candidateKeys = ["access_token", "token", "authToken", "jwt"];
-  for (const key of candidateKeys) {
+  for (const key of TOKEN_STORAGE_KEYS) {
     try {
       const value = window.localStorage?.getItem?.(key);
       if (value) {
@@ -24,10 +32,42 @@ function pickStoredToken() {
   return null;
 }
 
+function clearStoredTokens() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  for (const key of TOKEN_STORAGE_KEYS) {
+    try {
+      window.localStorage?.removeItem?.(key);
+    } catch (error) {
+      // ignore storage errors
+    }
+    try {
+      window.sessionStorage?.removeItem?.(key);
+    } catch (error) {
+      // ignore storage errors
+    }
+    if (typeof document !== "undefined") {
+      try {
+        document.cookie = `${key}=; Max-Age=0; path=/;`;
+      } catch (error) {
+        // ignore cookie errors
+      }
+    }
+  }
+}
+
 function sanitizePayload(values) {
   const payload = {};
+  if (typeof values.nickname === "string") {
+    payload.nickname = values.nickname.trim();
+  }
   if (typeof values.display_name === "string") {
     payload.display_name = values.display_name.trim();
+  }
+  if (typeof values.email === "string") {
+    payload.email = values.email.trim();
   }
   if (typeof values.avatar_url === "string") {
     payload.avatar_url = values.avatar_url.trim();
@@ -39,8 +79,9 @@ function sanitizePayload(values) {
 }
 
 export default function ProfilePage() {
+  const router = useRouter();
   const [profile, setProfile] = useState(null);
-  const [formValues, setFormValues] = useState({ display_name: "", avatar_url: "", bio: "" });
+  const [formValues, setFormValues] = useState({ display_name: "", nickname: "", email: "", avatar_url: "", bio: "" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -49,6 +90,7 @@ export default function ProfilePage() {
   const [avatarFile, setAvatarFile] = useState(null);
   const [avatarPreview, setAvatarPreview] = useState("");
   const [avatarError, setAvatarError] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
   const fileInputRef = useRef(null);
 
   const loadProfile = useCallback(async () => {
@@ -92,6 +134,8 @@ export default function ProfilePage() {
       setProfile(user);
       setFormValues({
         display_name: user?.display_name ?? "",
+        nickname: user?.nickname ?? "",
+        email: user?.email ?? "",
         avatar_url: user?.avatar_url ?? "",
         bio: user?.bio ?? "",
       });
@@ -131,6 +175,28 @@ export default function ProfilePage() {
     setError("");
     setSuccess("");
     setAvatarError("");
+
+    const trimmedDisplayName = (formValues.display_name ?? "").trim();
+    const trimmedNickname = (formValues.nickname ?? "").trim();
+    const trimmedEmail = (formValues.email ?? "").trim();
+
+    if (!trimmedNickname) {
+      setError("请输入昵称");
+      return;
+    }
+    if (!trimmedDisplayName) {
+      setError("请输入展示昵称");
+      return;
+    }
+    if (!trimmedEmail) {
+      setError("请输入电子邮箱地址");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setError("请输入有效的电子邮箱地址");
+      return;
+    }
+
     setSaving(true);
 
     try {
@@ -140,7 +206,12 @@ export default function ProfilePage() {
         throw new Error("请先登录后再更新信息");
       }
 
-      let nextValues = { ...formValues };
+      let nextValues = {
+        ...formValues,
+        display_name: trimmedDisplayName,
+        nickname: trimmedNickname,
+        email: trimmedEmail,
+      };
 
       if (avatarFile) {
         const formData = new FormData();
@@ -221,12 +292,16 @@ export default function ProfilePage() {
         setProfile(user);
         setFormValues({
           display_name: user?.display_name ?? "",
+          nickname: user?.nickname ?? "",
+          email: user?.email ?? "",
           avatar_url: user?.avatar_url ?? "",
           bio: user?.bio ?? "",
         });
       } else {
         setFormValues({
           display_name: nextValues.display_name ?? "",
+          nickname: nextValues.nickname ?? "",
+          email: nextValues.email ?? "",
           avatar_url: nextValues.avatar_url ?? "",
           bio: nextValues.bio ?? "",
         });
@@ -270,12 +345,108 @@ export default function ProfilePage() {
     fileInputRef.current?.click();
   };
 
-  const initialLetter = useMemo(() => {
-    const name = formValues.display_name || profile?.username || "用户";
-    return name.slice(0, 1).toUpperCase();
-  }, [formValues.display_name, profile?.username]);
+  const handleLogout = async () => {
+    if (loggingOut) {
+      return;
+    }
 
-  const displayAvatar = avatarPreview || formValues.avatar_url;
+    setLoggingOut(true);
+    setError("");
+    setSuccess("");
+    setAvatarError("");
+
+    try {
+      const token = pickStoredToken();
+      if (token) {
+        try {
+          await fetch(`${API_BASE_URL}/logout`, {
+            method: "POST",
+            headers: {
+              Accept: "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            cache: "no-store",
+            credentials: "include",
+          });
+        } catch (logoutError) {
+          // ignore logout failures
+        }
+      }
+    } finally {
+      clearStoredTokens();
+      setProfile(null);
+      setFormValues({ display_name: "", nickname: "", email: "", avatar_url: "", bio: "" });
+      setAvatarFile(null);
+      if (avatarPreview && typeof window !== "undefined") {
+        URL.revokeObjectURL(avatarPreview);
+      }
+      setAvatarPreview("");
+      setAvatarError("");
+      setUnauthorized(true);
+      setLoggingOut(false);
+
+      try {
+        router.replace("/");
+      } catch (navigationError) {
+        if (typeof window !== "undefined") {
+          window.location.href = "/";
+        }
+      }
+    }
+  };
+
+  const primaryDisplayName =
+    formValues.nickname ||
+    profile?.nickname ||
+    formValues.display_name ||
+    profile?.display_name ||
+    profile?.username ||
+    "未登录";
+
+  const accountUsername = profile?.username ?? "未登录";
+  const accountEmail = formValues.email || profile?.email || "未填写";
+
+  const avatarAlt = primaryDisplayName ? `${primaryDisplayName}头像` : "用户头像";
+  const displayAvatar = avatarPreview || formValues.avatar_url || profile?.avatar_url || "";
+
+  const initialLetter = useMemo(() => {
+    const name = primaryDisplayName || "用户";
+    return name.slice(0, 1).toUpperCase();
+  }, [primaryDisplayName]);
+
+  const roleBadges = useMemo(() => {
+    if (!Array.isArray(profile?.roles)) {
+      return [];
+    }
+
+    const labels = [];
+    const seen = new Set();
+
+    for (const role of profile.roles) {
+      if (typeof role !== "string") {
+        continue;
+      }
+      const normalized = role.trim();
+      if (!normalized) {
+        continue;
+      }
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      const pretty = normalized
+        .split(/[_\s-]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+      const label = (ROLE_LABELS[key] ?? pretty) || normalized;
+      labels.push(label);
+    }
+
+    return labels;
+  }, [profile?.roles]);
+
   const isAdmin = useMemo(() => {
     return Array.isArray(profile?.roles) && profile.roles.some((role) => typeof role === "string" && role.toLowerCase() === "admin");
   }, [profile?.roles]);
@@ -313,23 +484,33 @@ export default function ProfilePage() {
             <h1 className="text-2xl font-semibold text-slate-900">个人主页</h1>
             <p className="text-sm text-slate-500">编辑头像、昵称和介绍，展示你的个性化身份。</p>
           </div>
-          <button
-            type="button"
-            onClick={loadProfile}
-            disabled={loading}
-            className="self-start rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:text-slate-300"
-          >
-            {loading ? "刷新中..." : "刷新"}
-          </button>
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={loadProfile}
+              disabled={loading || loggingOut}
+              className="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:text-slate-300"
+            >
+              {loading ? "刷新中..." : "刷新"}
+            </button>
+            <button
+              type="button"
+              onClick={handleLogout}
+              disabled={loggingOut}
+              className="rounded-full border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-500 transition hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {loggingOut ? "退出中..." : "退出登录"}
+            </button>
+          </div>
         </header>
 
         <main className="mt-6">
           <section className="flex flex-col gap-6 rounded-3xl border border-slate-100 bg-white/90 p-6 shadow">
             <div className="flex items-center gap-4">
-              {formValues.avatar_url ? (
+              {displayAvatar ? (
                 <img
-                  src={formValues.avatar_url}
-                  alt={formValues.display_name || profile?.username || "用户头像"}
+                  src={displayAvatar}
+                  alt={avatarAlt}
                   className="h-20 w-20 rounded-3xl object-cover"
                 />
               ) : (
@@ -339,26 +520,76 @@ export default function ProfilePage() {
               )}
               <div>
                 <h2 className="text-xl font-semibold text-slate-900">
-                  {profile?.username ?? "未登录"}
+                  {primaryDisplayName}
                 </h2>
-                <p className="text-sm text-slate-500">
-                  {profile?.roles?.length ? profile.roles.join(" / ") : "普通用户"}
-                </p>
+                <div className="mt-1 flex flex-col gap-1 text-xs text-slate-500 sm:flex-row sm:items-center sm:gap-4">
+                  <span>用户名：{accountUsername}</span>
+                  <span>电子邮箱：{accountEmail}</span>
+                </div>
+
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {roleBadges.length > 0 ? (
+                    roleBadges.map((role) => (
+                      <span
+                        key={role}
+                        className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-600"
+                      >
+                        {role}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-sm text-slate-500">{ROLE_LABELS.user}</span>
+                  )}
+                </div>
+
                 <p className="text-xs text-slate-400">
-                  创建时间：{profile?.created_at ?? profile?.createdAt ?? "--"}
+                  加入时间：{profile?.created_at ?? profile?.createdAt ?? "--"}
                 </p>
                 {isAdmin ? (
                   <Link
                     href="/admin"
                     className="mt-2 inline-flex items-center justify-center rounded-full border border-blue-200 px-3 py-1 text-xs font-medium text-blue-600 transition hover:bg-blue-50"
                   >
-                    前往管理后台
+                    进入管理后台
                   </Link>
                 ) : null}
               </div>
             </div>
 
             <form className="space-y-5" onSubmit={handleSubmit}>
+              <div className="grid gap-2">
+                <label htmlFor="nickname" className="text-sm font-medium text-slate-600">
+                  昵称
+                </label>
+                <input
+                  id="nickname"
+                  name="nickname"
+                  type="text"
+                  required
+                  minLength={1}
+                  value={formValues.nickname}
+                  onChange={handleChange}
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  placeholder="请输入昵称"
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <label htmlFor="email" className="text-sm font-medium text-slate-600">
+                  电子邮箱
+                </label>
+                <input
+                  id="email"
+                  name="email"
+                  type="email"
+                  required
+                  value={formValues.email}
+                  onChange={handleChange}
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  placeholder="请输入有效的邮箱"
+                />
+              </div>
+
               <div className="grid gap-2">
                 <label htmlFor="display_name" className="text-sm font-medium text-slate-600">
                   昵称
@@ -382,7 +613,7 @@ export default function ProfilePage() {
                   {displayAvatar ? (
                     <img
                       src={displayAvatar}
-                      alt={formValues.display_name || profile?.username || "用户头像"}
+                      alt={avatarAlt}
                       className="h-20 w-20 rounded-3xl object-cover"
                     />
                   ) : (

@@ -2,10 +2,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+const API_BASE_URL = getApiBaseUrl();
 
 function pickStoredToken() {
   if (typeof window === "undefined") {
