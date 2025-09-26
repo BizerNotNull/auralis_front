@@ -50,26 +50,58 @@ const INITIAL_FORM_VALUES = {
   max_tokens: "1024",
   live2d_model_id: "",
   voice_id: "",
+  voice_provider: "",
   avatar_url: "",
   status: "",
 };
 
-function isQiniuVoice(option) {
-  if (!option || typeof option !== "object") {
-    return false;
-  }
-  const provider = String(option.provider ?? "")
-    .trim()
-    .toLowerCase();
-  if (provider && provider.includes("qiniu")) {
-    return true;
-  }
-  const id = String(option.id ?? "")
-    .trim()
-    .toLowerCase();
-  return id.startsWith("qiniu");
-}
 
+
+function findDefaultVoiceForProvider(providerId, voiceProviders, voiceOptions) {
+  const normalized = String(providerId ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+
+  let preferredVoiceId = "";
+  if (Array.isArray(voiceProviders)) {
+    const providerEntry = voiceProviders.find((item) => {
+      const idValue = String(item?.id ?? item?.ID ?? "").trim();
+      return idValue && idValue.toLowerCase() === normalized;
+    });
+    preferredVoiceId = providerEntry
+      ? String(providerEntry?.default_voice ?? providerEntry?.defaultVoice ?? "").trim()
+      : "";
+  }
+
+  if (preferredVoiceId && Array.isArray(voiceOptions)) {
+    const exists = voiceOptions.some(
+      (option) =>
+        String(option?.id ?? "")
+          .trim()
+          .toLowerCase() === preferredVoiceId.toLowerCase(),
+    );
+    if (exists) {
+      return preferredVoiceId;
+    }
+  }
+
+  if (Array.isArray(voiceOptions)) {
+    const match = voiceOptions.find((option) => {
+      const providerValue = String(
+        option?.provider ?? option?.Provider ?? "",
+      )
+        .trim()
+        .toLowerCase();
+      return providerValue === normalized;
+    });
+    if (match && match.id != null) {
+      return String(match.id).trim();
+    }
+  }
+
+  return "";
+}
 function normalizeLive2DModels(list) {
   if (!Array.isArray(list)) {
     return [];
@@ -217,12 +249,15 @@ export default function CreateAgentPage() {
     defaultVoice: "",
   });
   const [voiceOptions, setVoiceOptions] = useState([]);
+  const [voiceProviders, setVoiceProviders] = useState([]);
+  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState("");
   const [voicePreviewStatus, setVoicePreviewStatus] = useState({
     loading: false,
     voiceId: "",
     error: null,
   });
   const [voiceSearchTerm, setVoiceSearchTerm] = useState("");
+  const initialVoiceProviderRef = useRef(String(values.voice_provider ?? "").trim());
 
   const stopVoicePreview = useCallback(() => {
     const audio = voicePreviewAudioRef.current;
@@ -388,46 +423,81 @@ export default function CreateAgentPage() {
         }
 
         if (!response.ok) {
-          throw new Error(`音色列表加载失败 (${response.status})`);
+          throw new Error(`�����б�����ʧ�� (${response.status})`);
         }
 
         const data = await response.json();
         const voices = Array.isArray(data?.voices) ? data.voices : [];
+        const providers = Array.isArray(data?.providers) ? data.providers : [];
 
-        const qiniuVoices = voices.filter((item) => isQiniuVoice(item));
+        setVoiceOptions(voices);
+        setVoiceProviders(providers);
 
-        setVoiceOptions(qiniuVoices);
-        const defaultVoice = (() => {
-          const preferred = String(data?.default_voice ?? "").trim();
-          if (preferred) {
-            const exists = qiniuVoices.some(
-              (item) =>
-                String(item?.id ?? "")
-                  .trim()
-                  .toLowerCase() === preferred.toLowerCase(),
-            );
-            if (exists) {
-              return preferred;
+        const defaultProviderFromAPI = String(data?.default_provider ?? "").trim();
+        const normalizedProviders = providers
+          .map((item) => ({
+            id: String(item?.id ?? "").trim(),
+            enabled: Boolean(item?.enabled),
+            defaultVoice: String(
+              item?.default_voice ?? item?.defaultVoice ?? "",
+            ).trim(),
+          }))
+          .filter((item) => item.id);
+
+        const determineDefaultProvider = () => {
+          const existing = String(initialVoiceProviderRef.current ?? "").trim();
+          if (existing) {
+            return existing;
+          }
+          if (defaultProviderFromAPI) {
+            return defaultProviderFromAPI;
+          }
+          const active = normalizedProviders.find((item) => item.enabled);
+          if (active) {
+            return active.id;
+          }
+          if (normalizedProviders.length > 0) {
+            return normalizedProviders[0].id;
+          }
+          if (voices.length > 0) {
+            const providerId = String(
+              voices[0]?.provider ?? voices[0]?.Provider ?? "",
+            ).trim();
+            if (providerId) {
+              return providerId;
             }
           }
-          return qiniuVoices.length > 0 ? String(qiniuVoices[0]?.id ?? "") : "";
-        })();
+          return "";
+        };
+
+        const preferredProvider = determineDefaultProvider();
+        const defaultVoiceForProvider = findDefaultVoiceForProvider(
+          preferredProvider,
+          providers,
+          voices,
+        );
+
         setVoiceStatus({
           loading: false,
           error: null,
-          enabled: qiniuVoices.length > 0 && Boolean(data?.enabled),
-          defaultVoice,
+          enabled: voices.length > 0 && Boolean(data?.enabled),
+          defaultVoice: defaultVoiceForProvider,
         });
 
-        const nextVoice = defaultVoice;
-        if (nextVoice) {
-          setValues((prev) => {
-            if (prev.voice_id) {
-              return prev;
-            }
-            return { ...prev, voice_id: String(nextVoice) };
-          });
-        }
+        setSelectedVoiceProvider(preferredProvider);
+        setValues((prev) => {
+          const updates = {};
+          let changed = false;
+          if (!String(prev.voice_provider ?? "").trim() && preferredProvider) {
+            updates.voice_provider = preferredProvider;
+            changed = true;
+          }
+          if (!String(prev.voice_id ?? "").trim() && defaultVoiceForProvider) {
+            updates.voice_id = String(defaultVoiceForProvider);
+            changed = true;
+          }
+          return changed ? { ...prev, ...updates } : prev;
+        });
       } catch (error) {
         if (cancelled) {
           return;
@@ -435,9 +505,10 @@ export default function CreateAgentPage() {
 
         console.error(error);
         setVoiceOptions([]);
+        setVoiceProviders([]);
         setVoiceStatus({
           loading: false,
-          error: error?.message ?? "音色列表加载失败",
+          error: error?.message ?? "�����б�����ʧ��",
           enabled: false,
           defaultVoice: "",
         });
@@ -454,6 +525,17 @@ export default function CreateAgentPage() {
       stopVoicePreview();
     };
   }, [stopVoicePreview]);
+
+  useEffect(() => {
+    const providerValue = String(values.voice_provider ?? "").trim();
+    if (!providerValue) {
+      return;
+    }
+    setSelectedVoiceProvider((prev) =>
+      prev === providerValue ? prev : providerValue,
+    );
+  }, [values.voice_provider]);
+
 
   const populateFormFromAgent = useCallback(
     (agent, config) => {
@@ -496,7 +578,9 @@ export default function CreateAgentPage() {
         temperature: temperature || prev.temperature,
         max_tokens: maxTokens || prev.max_tokens,
         live2d_model_id: agent?.live2d_model_id ?? "",
-        voice_id: agent?.voice_id ?? agent?.voiceId ?? prev.voice_id ?? "",
+voice_id: agent?.voice_id ?? agent?.voiceId ?? prev.voice_id ?? "",
+voice_provider:
+  agent?.voice_provider ?? agent?.voiceProvider ?? prev.voice_provider ?? "",
         avatar_url: agent?.avatar_url ?? prev.avatar_url ?? "",
         status: agent?.status ?? prev.status ?? "",
       }));
@@ -614,6 +698,39 @@ export default function CreateAgentPage() {
     );
   }, [values.voice_id, voiceOptions]);
 
+  const availableVoiceProviders = useMemo(() => {
+    if (voiceProviders.length > 0) {
+      return voiceProviders
+        .map((item) => {
+          const id = String(item?.id ?? "").trim();
+          if (!id) {
+            return null;
+          }
+          const label = String(item?.label ?? item?.id ?? id).trim() || id;
+          return {
+            id,
+            label,
+            enabled: Boolean(item?.enabled),
+          };
+        })
+        .filter(Boolean);
+    }
+
+    const uniqueProviders = new Map();
+    voiceOptions.forEach((option) => {
+      const providerId = String(option?.provider ?? option?.Provider ?? "").trim();
+      if (!providerId || uniqueProviders.has(providerId)) {
+        return;
+      }
+      uniqueProviders.set(providerId, {
+        id: providerId,
+        label: providerId,
+        enabled: true,
+      });
+    });
+    return Array.from(uniqueProviders.values());
+  }, [voiceOptions, voiceProviders]);
+
   const voiceSearchToken = useMemo(
     () => voiceSearchTerm.trim().toLowerCase(),
     [voiceSearchTerm],
@@ -623,10 +740,23 @@ export default function CreateAgentPage() {
     if (!voiceOptions.length) {
       return [];
     }
+
+    const normalizedProvider = String(selectedVoiceProvider ?? "").trim().toLowerCase();
+    const baseList = voiceOptions.filter((option) => {
+      if (!normalizedProvider) {
+        return true;
+      }
+      const optionProvider = String(option?.provider ?? option?.Provider ?? "")
+        .trim()
+        .toLowerCase();
+      return optionProvider === normalizedProvider;
+    });
+
     if (!voiceSearchToken) {
-      return voiceOptions;
+      return baseList;
     }
-    return voiceOptions.filter((option) => {
+
+    return baseList.filter((option) => {
       const parts = [
         option?.display_name,
         option?.displayName,
@@ -639,7 +769,39 @@ export default function CreateAgentPage() {
         .map((value) => value.toLowerCase());
       return parts.some((part) => part.includes(voiceSearchToken));
     });
-  }, [voiceOptions, voiceSearchToken]);
+  }, [voiceOptions, selectedVoiceProvider, voiceSearchToken]);
+
+  useEffect(() => {
+    if (!selectedVoiceProvider) {
+      return;
+    }
+    const currentVoice = String(values.voice_id ?? "").trim().toLowerCase();
+    const exists = filteredVoiceOptions.some(
+      (option) =>
+        String(option?.id ?? "")
+          .trim()
+          .toLowerCase() === currentVoice,
+    );
+    if (exists) {
+      return;
+    }
+    const fallbackVoice =
+      filteredVoiceOptions.length > 0
+        ? String(filteredVoiceOptions[0]?.id ?? "")
+        : "";
+    if (!fallbackVoice && !currentVoice) {
+      return;
+    }
+    setValues((prev) => {
+      if (fallbackVoice) {
+        return { ...prev, voice_id: fallbackVoice };
+      }
+      if (!prev.voice_id) {
+        return prev;
+      }
+      return { ...prev, voice_id: "" };
+    });
+  }, [filteredVoiceOptions, selectedVoiceProvider, setValues, values.voice_id]);
 
   useEffect(() => {
     if (!chatModelOptions.length) {
@@ -834,6 +996,14 @@ export default function CreateAgentPage() {
             String(item?.id ?? "").toLowerCase() === target.toLowerCase(),
         ) ?? null;
 
+      const providerForPreview = String(
+        selectedVoiceProvider ||
+          values.voice_provider ||
+          option?.provider ||
+          option?.Provider ||
+          "",
+      ).trim();
+
       let audioSrc = option?.sample_url ?? option?.sampleUrl ?? "";
 
       try {
@@ -845,6 +1015,7 @@ export default function CreateAgentPage() {
             body: JSON.stringify({
               text: VOICE_PREVIEW_SAMPLE,
               voice_id: target,
+              provider: providerForPreview,
             }),
           });
           if (!response.ok) {
@@ -912,6 +1083,8 @@ export default function CreateAgentPage() {
       voicePreviewStatus.loading,
       voicePreviewStatus.voiceId,
       stopVoicePreview,
+      selectedVoiceProvider,
+      values.voice_provider,
     ],
   );
 
@@ -926,6 +1099,63 @@ export default function CreateAgentPage() {
     },
     [stopVoicePreview, setValues],
   );
+  const handleVoiceProviderChange = useCallback(
+    (event) => {
+      const rawValue = event?.target?.value ?? "";
+      const nextProvider = String(rawValue).trim();
+
+      stopVoicePreview();
+      setSelectedVoiceProvider(nextProvider);
+      setVoiceSearchTerm("");
+
+      setValues((prev) => {
+        const nextState = { ...prev, voice_provider: nextProvider };
+
+        const normalizedProvider = nextProvider.toLowerCase();
+        const currentVoice = String(prev.voice_id ?? "").trim();
+        let keepCurrent = false;
+        if (currentVoice && normalizedProvider) {
+          const currentOption = voiceOptions.find(
+            (option) =>
+              String(option?.id ?? "")
+                .trim()
+                .toLowerCase() === currentVoice.toLowerCase(),
+          );
+          if (currentOption) {
+            const optionProvider = String(
+              currentOption?.provider ?? currentOption?.Provider ?? "",
+            )
+              .trim()
+              .toLowerCase();
+            keepCurrent = optionProvider === normalizedProvider;
+          }
+        }
+
+        if (!keepCurrent) {
+          const fallbackVoice = findDefaultVoiceForProvider(
+            nextProvider,
+            voiceProviders,
+            voiceOptions,
+          );
+          nextState.voice_id = fallbackVoice || "";
+        }
+
+        return nextState;
+      });
+    },
+    [
+      setValues,
+      setSelectedVoiceProvider,
+      setVoiceSearchTerm,
+      stopVoicePreview,
+      voiceOptions,
+      voiceProviders,
+    ],
+  );
+
+
+
+
 
   const handleAvatarChange = (event) => {
     const file = event.target?.files?.[0];
@@ -1004,6 +1234,10 @@ export default function CreateAgentPage() {
       const trimmedVoiceId = (values.voice_id ?? "").trim();
       if (trimmedVoiceId) {
         formData.append("voice_id", trimmedVoiceId);
+        const providerValue = (values.voice_provider ?? "").trim();
+        if (providerValue) {
+          formData.append("voice_provider", providerValue);
+        }
       } else if (voiceStatus.enabled && voiceOptions.length > 0) {
         throw new Error("请选择音色");
       }
@@ -1253,30 +1487,54 @@ export default function CreateAgentPage() {
                 </div>
 
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <label className="relative flex-1">
-                    <span className="sr-only">搜索音色</span>
-                    <input
-                      id="agent-voice-search"
-                      type="text"
-                      value={voiceSearchTerm}
-                      onChange={(event) =>
-                        setVoiceSearchTerm(event.target.value)
-                      }
-                      placeholder="搜索音色、语言或提供方"
-                      className="w-full rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                    />
-                    {voiceSearchTerm ? (
-                      <button
-                        type="button"
-                        onClick={() => setVoiceSearchTerm("")}
-                        className="absolute inset-y-0 right-3 flex items-center text-xs text-slate-400 transition hover:text-slate-600"
-                        aria-label="清除搜索"
-                      >
-                        清除
-                      </button>
+                  <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                    {availableVoiceProviders.length > 0 ? (
+                      <label className="flex items-center gap-2 text-xs font-medium text-slate-600 sm:text-sm">
+                        <span>供应商</span>
+                        <select
+                          value={selectedVoiceProvider}
+                          onChange={handleVoiceProviderChange}
+                          className="rounded-full border border-slate-200 bg-white px-3 py-1 text-sm text-slate-700 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        >
+                          {availableVoiceProviders.map((provider) => (
+                            <option
+                              key={provider.id}
+                              value={provider.id}
+                              disabled={!provider.enabled}
+                            >
+                              {provider.label}
+                              {!provider.enabled ? "（未启用）" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                     ) : null}
-                  </label>
-                </div>
+
+                    <label className="relative flex-1">
+                      <span className="sr-only">搜索音色</span>
+                      <input
+                        id="agent-voice-search"
+                        type="text"
+                        value={voiceSearchTerm}
+                        onChange={(event) =>
+                          setVoiceSearchTerm(event.target.value)
+                        }
+                        placeholder="搜索音色或供应商"
+                        className="w-full rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      />
+                      {voiceSearchTerm ? (
+                        <button
+                          type="button"
+                          onClick={() => setVoiceSearchTerm("")}
+                          className="absolute inset-y-0 right-3 flex items-center text-xs text-slate-400 transition hover:text-slate-600"
+                          aria-label="清除搜索"
+                        >
+                          清除
+                        </button>
+                      ) : null}
+                    </label>
+                    </div>
+                  </div>
 
                 <div className="rounded-2xl border border-slate-200 bg-white/80 p-2 shadow-inner max-h-80 overflow-y-auto">
                   {filteredVoiceOptions.length > 0 ? (
@@ -1356,7 +1614,7 @@ export default function CreateAgentPage() {
                     </div>
                   ) : (
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
-                      {voiceOptions.length === 0
+                      {filteredVoiceOptions.length === 0
                         ? "暂无可选音色，将使用系统默认音色。"
                         : "未找到匹配的音色，请尝试其他关键词。"}
                     </div>
@@ -1538,3 +1796,4 @@ export default function CreateAgentPage() {
     </div>
   );
 }
+

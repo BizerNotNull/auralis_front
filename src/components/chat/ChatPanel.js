@@ -607,6 +607,8 @@ export default function ChatPanel({
     defaultVoice: "",
   });
   const [voiceOptions, setVoiceOptions] = useState([]);
+  const [voiceProviders, setVoiceProviders] = useState([]);
+  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState("");
   const [selectedVoice, setSelectedVoice] = useState("");
   const [speechSpeed, setSpeechSpeed] = useState(1.0);
   const [speechPitch, setSpeechPitch] = useState(1.0);
@@ -1314,6 +1316,9 @@ export default function ChatPanel({
   useEffect(() => {
     if (!agentId) {
       setVoiceOptions([]);
+      setVoiceProviders([]);
+      setSelectedVoiceProvider("");
+      setSelectedVoice("");
       setVoiceStatus((prev) => ({
         ...prev,
         enabled: false,
@@ -1322,8 +1327,10 @@ export default function ChatPanel({
       }));
       return;
     }
+
     let aborted = false;
     setVoiceStatus((prev) => ({ ...prev, loading: true, error: null }));
+
     (async () => {
       try {
         const response = await fetch(`${API_BASE_URL}/tts/voices`, {
@@ -1335,57 +1342,146 @@ export default function ChatPanel({
           return;
         }
         if (!response.ok) {
-          throw new Error(`请求语音列表失败: ${response.status}`);
+          throw new Error(`语音列表加载失败: ${response.status}`);
         }
+
         const data = await response.json();
         const voices = Array.isArray(data?.voices) ? data.voices : [];
-        const qiniuVoices = voices.filter((item) => isQiniuVoice(item));
-        setVoiceOptions(qiniuVoices);
-        const defaultVoice = (() => {
-          const preferred = String(data?.default_voice ?? "").trim();
-          if (preferred) {
-            const exists = qiniuVoices.some(
+        const providers = Array.isArray(data?.providers) ? data.providers : [];
+
+        setVoiceOptions(voices);
+        setVoiceProviders(providers);
+
+        const normalizedProviders = providers
+          .map((item) => ({
+            id: String(item?.id ?? "").trim(),
+            label: String(item?.label ?? item?.id ?? "").trim(),
+            defaultVoice: String(item?.default_voice ?? "").trim(),
+            enabled: Boolean(item?.enabled),
+          }))
+          .filter((item) => item.id);
+
+        const defaultProviderFromAPI = String(data?.default_provider ?? "").trim();
+        const agentProvider = String(
+          agent?.voice_provider ?? agent?.voiceProvider ?? "",
+        ).trim();
+
+        const determinePreferredProvider = () => {
+          if (agentProvider) {
+            return agentProvider;
+          }
+          if (defaultProviderFromAPI) {
+            return defaultProviderFromAPI;
+          }
+          const enabledProvider = normalizedProviders.find((item) => item.enabled);
+          if (enabledProvider) {
+            return enabledProvider.id;
+          }
+          if (normalizedProviders.length > 0) {
+            return normalizedProviders[0].id;
+          }
+          if (voices.length > 0) {
+            const providerId = String(
+              voices[0]?.provider ?? voices[0]?.Provider ?? "",
+            ).trim();
+            if (providerId) {
+              return providerId;
+            }
+          }
+          return "";
+        };
+
+        const resolveDefaultVoice = (providerId) => {
+          if (!providerId) {
+            return "";
+          }
+          const normalized = providerId.toLowerCase();
+          const providerEntry = normalizedProviders.find(
+            (item) => item.id.toLowerCase() === normalized,
+          );
+          const preferredVoiceId = String(providerEntry?.defaultVoice ?? "").trim();
+          if (preferredVoiceId) {
+            const exists = voices.some(
               (item) =>
                 String(item?.id ?? "")
                   .trim()
-                  .toLowerCase() === preferred.toLowerCase(),
+                  .toLowerCase() === preferredVoiceId.toLowerCase(),
             );
             if (exists) {
-              return preferred;
+              return preferredVoiceId;
             }
           }
-          return qiniuVoices.length > 0 ? String(qiniuVoices[0]?.id ?? "") : "";
-        })();
+          const match = voices.find((item) => {
+            const providerValue = String(
+              item?.provider ?? item?.Provider ?? "",
+            )
+              .trim()
+              .toLowerCase();
+            return providerValue === normalized;
+          });
+          return match ? String(match.id ?? "") : "";
+        };
+
+        const agentVoiceId = String(
+          agent?.voice_id ?? agent?.voiceId ?? "",
+        ).trim();
+        const voiceEntry = voices.find(
+          (item) => String(item?.id ?? "").trim() === agentVoiceId,
+        );
+
+        let providerForState = determinePreferredProvider();
+        if (voiceEntry) {
+          const providerId = String(
+            voiceEntry.provider ?? voiceEntry.Provider ?? "",
+          ).trim();
+          if (providerId) {
+            providerForState = providerId;
+          }
+        }
+
+        const defaultVoice = voiceEntry
+          ? agentVoiceId
+          : resolveDefaultVoice(providerForState);
+
         setVoiceStatus({
           loading: false,
           error: null,
-          enabled: qiniuVoices.length > 0 && Boolean(data?.enabled),
+          enabled: voices.length > 0 && Boolean(data?.enabled),
           defaultVoice,
         });
 
-        const preferred =
-          agent?.voice_id ??
-          agent?.voiceId ??
-          (defaultVoice ||
-            (qiniuVoices.length > 0 ? String(qiniuVoices[0]?.id ?? "") : ""));
-        setSelectedVoice(preferred ? String(preferred) : "");
+        setSelectedVoiceProvider(providerForState);
+        setSelectedVoice(defaultVoice);
+        setSpeechError(null);
       } catch (error) {
         if (aborted) {
           return;
         }
         console.error(error);
+        setVoiceOptions([]);
+        setVoiceProviders([]);
+        setSelectedVoiceProvider("");
+        setSelectedVoice("");
         setVoiceStatus({
           loading: false,
-          error: error?.message ?? "加载语音列表失败",
+          error: error?.message ?? "语音列表加载失败",
           enabled: false,
           defaultVoice: "",
         });
       }
     })();
+
     return () => {
       aborted = true;
     };
-  }, [agentId, agent?.voiceId, agent?.voice_id]);
+  }, [
+    agentId,
+    agent?.voiceId,
+    agent?.voice_id,
+    agent?.voice_provider,
+    agent?.voiceProvider,
+  ]);
+
 
   useEffect(() => {
     const agentVoice = agent?.voice_id ?? agent?.voiceId ?? "";
@@ -1448,6 +1544,28 @@ export default function ChatPanel({
       null
     );
   }, [selectedVoice, voiceOptions]);
+
+useEffect(() => {
+  if (!selectedVoice) {
+    return;
+  }
+  const voiceEntry = voiceOptions.find(
+    (item) =>
+      String(item?.id ?? "")
+        .trim()
+        .toLowerCase() === String(selectedVoice).trim().toLowerCase(),
+  );
+  if (!voiceEntry) {
+    return;
+  }
+  const providerValue = String(
+    voiceEntry?.provider ?? voiceEntry?.Provider ?? "",
+  ).trim();
+  if (providerValue && providerValue !== selectedVoiceProvider) {
+    setSelectedVoiceProvider(providerValue);
+  }
+}, [selectedVoice, selectedVoiceProvider, voiceOptions]);
+
 
   const selectedVoiceLabel = useMemo(() => {
     if (selectedVoiceOption) {
@@ -2377,6 +2495,14 @@ export default function ChatPanel({
       };
       if (targetVoice) {
         payload.voice_id = targetVoice;
+        const providerValue = String(
+          selectedVoiceOption?.provider ??
+            selectedVoiceOption?.Provider ??
+            "",
+        ).trim();
+        if (providerValue) {
+          payload.voice_provider = providerValue;
+        }
       }
       const minSpeed = Number(speedRange?.[0] ?? 0.5);
       const maxSpeed = Number(speedRange?.[1] ?? 1.6);
