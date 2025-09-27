@@ -97,6 +97,39 @@ function hasSpeechAudioSource(speech) {
   );
 }
 
+function decodeBase64ToUint8(base64) {
+  if (typeof base64 !== "string" || !base64) {
+    return null;
+  }
+  try {
+    const normalized = base64.replace(/\s+/g, "");
+    const binary = atob(normalized);
+    const length = binary.length;
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch (error) {
+    console.warn("Failed to decode base64 audio chunk", error);
+    return null;
+  }
+}
+
+function isMediaSourceSupported(mime) {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  if (!window.MediaSource || typeof window.MediaSource.isTypeSupported !== "function") {
+    return false;
+  }
+  const candidate = String(mime ?? "").trim();
+  if (!candidate) {
+    return false;
+  }
+  return window.MediaSource.isTypeSupported(candidate);
+}
+
 function isQiniuVoice(option) {
   if (!option || typeof option !== "object") {
     return false;
@@ -501,6 +534,74 @@ export default function ChatPanel({
     error: null,
   });
   const [inputValue, setInputValue] = useState("");
+
+const patchMessageSpeechExtras = useCallback(
+  (messageId, mutate) => {
+    if (messageId === null || messageId === undefined) {
+      return;
+    }
+    const key = String(messageId);
+    setMessages((prev) => {
+      let changed = false;
+      const updated = prev.map((item) => {
+        const itemKey = String(item?.id ?? item?.ID ?? item?.clientId ?? "");
+        if (itemKey !== key) {
+          return item;
+        }
+        const extras = { ...(item.extrasParsed ?? {}) };
+        if (typeof mutate === "function") {
+          mutate(extras);
+        }
+        changed = true;
+        return {
+          ...item,
+          extrasParsed: extras,
+        };
+      });
+      if (changed) {
+        messagesRef.current = updated;
+      }
+      return updated;
+    });
+  },
+  [setMessages],
+);
+
+
+const updateMessageExtras = useCallback(
+  (messageId, mutator) => {
+    if (!messageId) {
+      return null;
+    }
+    const key = String(messageId);
+    const current = messagesRef.current.find((item) =>
+      String(item?.id ?? item?.ID ?? item?.clientId ?? "") === key,
+    );
+    if (!current) {
+      return null;
+    }
+    const extras = { ...(current.extrasParsed ?? {}) };
+    if (typeof mutator === "function") {
+      mutator(extras);
+    }
+    const updated = { ...current, extrasParsed: extras };
+    setMessages((prev) =>
+      prev.map((item) =>
+        String(item?.id ?? item?.ID ?? item?.clientId ?? "") === key
+          ? updated
+          : item,
+      ),
+    );
+    messagesRef.current = messagesRef.current.map((item) =>
+      String(item?.id ?? item?.ID ?? item?.clientId ?? "") === key
+        ? updated
+        : item,
+    );
+    return updated;
+  },
+  [setMessages],
+);
+
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState(null);
   const [currentRatingSummary, setCurrentRatingSummary] = useState(() =>
@@ -552,7 +653,7 @@ export default function ChatPanel({
       const statusRaw = extras?.speech_status ?? extras?.speechStatus ?? "";
       const status =
         typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
-      return status === "pending";
+      return status === "pending" || status === "streaming";
     });
     setSpeechPreparing((prev) =>
       prev === hasPendingSpeech ? prev : hasPendingSpeech,
@@ -1231,10 +1332,16 @@ export default function ChatPanel({
       if (!hasSpeechAudioSource(speech)) {
         return;
       }
-      const id = message.id ?? message.clientId;
-      if (!id) {
+      const rawId =
+        message.id ??
+        message.ID ??
+        message.clientId ??
+        message.clientID ??
+        null;
+      if (rawId === null || rawId === undefined) {
         return;
       }
+      const id = String(rawId);
       const alreadyPlayed = playedSpeechIdsRef.current.has(id);
       if (!force && alreadyPlayed) {
         return;
@@ -2247,7 +2354,7 @@ useEffect(() => {
           });
           return;
         }
-        if (status === "pending") {
+        if (status === "pending" || status === "streaming") {
           scheduleSpeechRefresh(messageId, attempt + 1);
           return;
         }
@@ -2272,7 +2379,7 @@ useEffect(() => {
         registerSpeech(assistantMessage, { interrupt: true });
         return;
       }
-      if (status === "pending") {
+      if (status === "pending" || status === "streaming") {
         const messageId = assistantMessage.id ?? assistantMessage.ID ?? null;
         if (messageId != null) {
           scheduleSpeechRefresh(messageId, 0);
@@ -2659,6 +2766,98 @@ useEffect(() => {
               upsertAssistantMessage(payload, { markFinal: true });
               break;
             }
+            case "speech_stream_started": {
+              const messageId = payload?.id ?? payload?.ID ?? null;
+              if (messageId !== null && messageId !== undefined) {
+                patchMessageSpeechExtras(messageId, (extras) => {
+                  extras.speech_status = "streaming";
+                });
+              }
+              break;
+            }
+            case "speech_stream_completed": {
+              const messageId = payload?.id ?? payload?.ID ?? null;
+              if (messageId !== null && messageId !== undefined) {
+                const audioBase64 =
+                  (typeof payload?.audio_base64 === "string" && payload.audio_base64.trim()) ||
+                  (typeof payload?.audioBase64 === "string" && payload.audioBase64.trim()) ||
+                  "";
+                const audioUrl =
+                  (typeof payload?.audio_url === "string" && payload.audio_url.trim()) ||
+                  (typeof payload?.audioUrl === "string" && payload.audioUrl.trim()) ||
+                  "";
+                const mimeType =
+                  (typeof payload?.mime_type === "string" && payload.mime_type.trim()) ||
+                  (typeof payload?.mimeType === "string" && payload.mimeType.trim()) ||
+                  "";
+                const speechPayload = {};
+                if (audioBase64) {
+                  speechPayload.audio_base64 = audioBase64;
+                }
+                if (audioUrl) {
+                  speechPayload.audio_url = audioUrl;
+                }
+                if (mimeType) {
+                  speechPayload.mime_type = mimeType;
+                }
+                if (payload?.voice_id) {
+                  speechPayload.voice_id = payload.voice_id;
+                }
+                if (payload?.provider) {
+                  speechPayload.provider = payload.provider;
+                }
+                patchMessageSpeechExtras(messageId, (extras) => {
+                  const speech = { ...(extras.speech ?? {}), ...speechPayload };
+                  extras.speech = speech;
+                  extras.speech_status = "ready";
+                  if (payload?.error) {
+                    extras.speech_error = payload.error;
+                  } else if (extras.speech_error) {
+                    delete extras.speech_error;
+                  }
+                });
+                const currentMessage = messagesRef.current.find(
+                  (item) =>
+                    String(item?.id ?? item?.ID ?? item?.clientId ?? "") ===
+                    String(messageId),
+                );
+                if (currentMessage) {
+                  const mergedExtras = {
+                    ...(currentMessage.extrasParsed ?? {}),
+                    speech: {
+                      ...((currentMessage.extrasParsed ?? {}).speech ?? {}),
+                      ...speechPayload,
+                    },
+                    speech_status: "ready",
+                  };
+                  if (payload?.error) {
+                    mergedExtras.speech_error = payload.error;
+                  } else if (mergedExtras.speech_error) {
+                    delete mergedExtras.speech_error;
+                  }
+                  registerSpeech(
+                    { ...currentMessage, extrasParsed: mergedExtras },
+                    { enqueue: true, interrupt: false },
+                  );
+                }
+              }
+              break;
+            }
+            case "speech_stream_failed": {
+              const messageId = payload?.id ?? payload?.ID ?? null;
+              if (messageId !== null && messageId !== undefined) {
+                patchMessageSpeechExtras(messageId, (extras) => {
+                  extras.speech_status = "error";
+                  const errorMessage =
+                    (typeof payload?.error === "string" && payload.error.trim()) ||
+                    "";
+                  if (errorMessage) {
+                    extras.speech_error = errorMessage;
+                  }
+                });
+              }
+              break;
+            }
             case "error": {
               const message =
                 typeof payload?.error === "string" && payload.error
@@ -2672,6 +2871,9 @@ useEffect(() => {
           }
         };
 
+
+
+
         if (contentType.includes("text/event-stream") && response.body) {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
@@ -2683,7 +2885,7 @@ useEffect(() => {
                 break;
               }
               buffer += decoder.decode(value, { stream: true });
-              buffer = buffer.replace(/\r\n/g, "\n");
+              buffer = buffer.replace(/\r/g, "");
               let boundary = buffer.indexOf("\n\n");
               while (boundary !== -1) {
                 const rawEvent = buffer.slice(0, boundary);
@@ -2715,7 +2917,7 @@ useEffect(() => {
                 handleStreamEvent(eventName, parsed);
               }
             }
-            buffer = buffer.replace(/\r\n/g, "\n");
+            buffer = buffer.replace(/\r/g, "");
             if (buffer.trim()) {
               const lines = buffer.trim().split("\n");
               let eventName = "message";
@@ -2745,7 +2947,6 @@ useEffect(() => {
           cleanOptimistic();
           return { success: true, trimmed, assistant: lastAssistant };
         }
-
         const data = await response.json().catch(() => null);
         if (data?.conversation_id) {
           setConversationId(String(data.conversation_id));
