@@ -38,6 +38,8 @@ const DEFAULT_LIVE2D_MODEL = {
 
 const VOICE_PREVIEW_SAMPLE = "你好,欢迎来到Auralis";
 
+const PREFERRED_VOICE_PROVIDER_ID = "aliyun-cosyvoice";
+
 const INITIAL_FORM_VALUES = {
   name: "",
   one_sentence_intro: "",
@@ -50,7 +52,7 @@ const INITIAL_FORM_VALUES = {
   max_tokens: "1024",
   live2d_model_id: "",
   voice_id: "",
-  voice_provider: "",
+  voice_provider: PREFERRED_VOICE_PROVIDER_ID,
   avatar_url: "",
   status: "",
 };
@@ -250,7 +252,7 @@ export default function CreateAgentPage() {
   });
   const [voiceOptions, setVoiceOptions] = useState([]);
   const [voiceProviders, setVoiceProviders] = useState([]);
-  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState("");
+  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState(PREFERRED_VOICE_PROVIDER_ID);
   const [voicePreviewStatus, setVoicePreviewStatus] = useState({
     loading: false,
     voiceId: "",
@@ -444,27 +446,70 @@ export default function CreateAgentPage() {
           }))
           .filter((item) => item.id);
 
+        const providerIdLookup = new Map();
+        normalizedProviders.forEach((item) => {
+          const key = item.id.toLowerCase();
+          if (!providerIdLookup.has(key)) {
+            providerIdLookup.set(key, item.id);
+          }
+        });
+        voices.forEach((voice) => {
+          const providerId = String(
+            voice?.provider ?? voice?.Provider ?? "",
+          ).trim();
+          if (!providerId) {
+            return;
+          }
+          const key = providerId.toLowerCase();
+          if (!providerIdLookup.has(key)) {
+            providerIdLookup.set(key, providerId);
+          }
+        });
+        const resolveProviderCandidate = (candidate) => {
+          const normalized = String(candidate ?? "")
+            .trim()
+            .toLowerCase();
+          if (!normalized) {
+            return "";
+          }
+          return providerIdLookup.get(normalized) ?? "";
+        };
+
         const determineDefaultProvider = () => {
-          const existing = String(initialVoiceProviderRef.current ?? "").trim();
+          const existing = resolveProviderCandidate(
+            initialVoiceProviderRef.current,
+          );
           if (existing) {
             return existing;
           }
-          if (defaultProviderFromAPI) {
-            return defaultProviderFromAPI;
+          const preferredByConfig = resolveProviderCandidate(
+            PREFERRED_VOICE_PROVIDER_ID,
+          );
+          if (preferredByConfig) {
+            return preferredByConfig;
           }
-          const active = normalizedProviders.find((item) => item.enabled);
+          const apiDefault = resolveProviderCandidate(defaultProviderFromAPI);
+          if (apiDefault) {
+            return apiDefault;
+          }
+          const active = normalizedProviders.find((item) =>
+            resolveProviderCandidate(item.id),
+          );
           if (active) {
-            return active.id;
+            return resolveProviderCandidate(active.id);
           }
-          if (normalizedProviders.length > 0) {
-            return normalizedProviders[0].id;
+          for (const item of normalizedProviders) {
+            const resolved = resolveProviderCandidate(item.id);
+            if (resolved) {
+              return resolved;
+            }
           }
-          if (voices.length > 0) {
-            const providerId = String(
-              voices[0]?.provider ?? voices[0]?.Provider ?? "",
-            ).trim();
-            if (providerId) {
-              return providerId;
+          for (const voice of voices) {
+            const resolved = resolveProviderCandidate(
+              voice?.provider ?? voice?.Provider ?? "",
+            );
+            if (resolved) {
+              return resolved;
             }
           }
           return "";
@@ -699,8 +744,28 @@ voice_provider:
   }, [values.voice_id, voiceOptions]);
 
   const availableVoiceProviders = useMemo(() => {
+    const reorderProviders = (list) => {
+      if (!Array.isArray(list) || list.length === 0) {
+        return [];
+      }
+      const normalizedPreferred = PREFERRED_VOICE_PROVIDER_ID.toLowerCase();
+      const preferred = [];
+      const others = [];
+      list.forEach((item) => {
+        const normalizedId = String(item?.id ?? "")
+          .trim()
+          .toLowerCase();
+        if (normalizedId && normalizedId === normalizedPreferred) {
+          preferred.push(item);
+        } else {
+          others.push(item);
+        }
+      });
+      return [...preferred, ...others];
+    };
+
     if (voiceProviders.length > 0) {
-      return voiceProviders
+      const normalizedList = voiceProviders
         .map((item) => {
           const id = String(item?.id ?? "").trim();
           if (!id) {
@@ -714,6 +779,7 @@ voice_provider:
           };
         })
         .filter(Boolean);
+      return reorderProviders(normalizedList);
     }
 
     const uniqueProviders = new Map();
@@ -728,7 +794,7 @@ voice_provider:
         enabled: true,
       });
     });
-    return Array.from(uniqueProviders.values());
+    return reorderProviders(Array.from(uniqueProviders.values()));
   }, [voiceOptions, voiceProviders]);
 
   const voiceSearchToken = useMemo(
@@ -1596,6 +1662,7 @@ voice_provider:
                     {voiceStatus.error ? (
                       <span className="text-rose-500">{voiceStatus.error}</span>
                     ) : null}
+                    <span className="text-slate-400">推荐使用cosyvoice,延迟更低</span>
                   </div>
                 </div>
 

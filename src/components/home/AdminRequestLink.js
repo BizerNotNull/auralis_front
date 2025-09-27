@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useMemo, useState } from "react";
 
@@ -99,11 +99,9 @@ export function AdminRequestLink({ userId, username, disabled = false, className
       >
         成为管理员
       </button>
-      {statusMessage ? (
-        <span className={`text-xs font-medium ${statusMessage.tone}`}>
-          {statusMessage.text}
-        </span>
-      ) : null}
+      <span className="text-sm text-slate-500">
+        注:需要管理员账号请直接 admin 123456 因为这个按钮的实现方式是给开发者本人发邮件
+      </span>
     </span>
   );
 }

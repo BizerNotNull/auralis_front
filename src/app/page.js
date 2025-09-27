@@ -281,7 +281,7 @@ export default async function Home() {
         <header className="flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3">
             <Image
-              src="/next.svg"
+              src="/Auralis.png"
               alt="Auralis"
               width={120}
               height={28}
@@ -384,7 +384,7 @@ export default async function Home() {
                 aria-hidden
               />
               <Image
-                src="/vercel.svg"
+                src="/auralis_big.png"
                 alt="Platform preview"
                 width={360}
                 height={360}
