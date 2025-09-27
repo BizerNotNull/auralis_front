@@ -1088,6 +1088,24 @@ voice_provider:
     ],
   );
 
+  const handleVoiceSelect = useCallback(
+    (voiceId) => {
+      const nextVoiceId = String(voiceId ?? "").trim();
+      if (!nextVoiceId) {
+        return;
+      }
+
+      setValues((prev) => {
+        if (prev.voice_id === nextVoiceId) {
+          return prev;
+        }
+        return { ...prev, voice_id: nextVoiceId };
+      });
+      stopVoicePreview();
+    },
+    [setValues, stopVoicePreview],
+  );
+
   const handleChange = useCallback(
     (event) => {
       const { name, value } = event.target;
@@ -1562,6 +1580,7 @@ voice_provider:
                         return (
                           <label
                             key={value}
+                            onClick={() => handleVoiceSelect(value)}
                             className={`group flex cursor-pointer flex-col gap-2 rounded-2xl border p-4 transition ${
                               isActive
                                 ? "border-blue-500 bg-blue-50/70 shadow"
@@ -1581,7 +1600,12 @@ voice_provider:
                               </div>
                               <button
                                 type="button"
-                                onClick={() => handleVoicePreview(value)}
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  handleVoiceSelect(value);
+                                  handleVoicePreview(value);
+                                }}
                                 className="rounded-full border border-slate-300 px-3 py-1 text-xs font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-300"
                                 disabled={
                                   voicePreviewStatus.loading &&
