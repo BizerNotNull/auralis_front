@@ -951,11 +951,26 @@ voice_provider:
 
   const handleModelSelect = useCallback(
     (entryUrl) => {
-      setValues((prev) => ({
-        ...prev,
+      const normalized =
+        typeof entryUrl === "string" ? entryUrl.trim() : "";
 
-        live2d_model_id: entryUrl,
-      }));
+      if (!normalized) {
+        return;
+      }
+
+      setValues((prev) => {
+        const current = (prev.live2d_model_id ?? "").trim();
+
+        if (current === normalized) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+
+          live2d_model_id: normalized,
+        };
+      });
     },
 
     [setValues],
@@ -1492,6 +1507,86 @@ voice_provider:
               <section className="space-y-3">
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                   <span className="text-sm font-medium text-slate-600">
+                    Live2D 模型
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    {modelListStatus.loading ? (
+                      <span className="text-slate-400">模型列表加载中...</span>
+                    ) : null}
+                    {modelListStatus.error ? (
+                      <span className="text-rose-500">{modelListStatus.error}</span>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white/80 p-3 shadow-inner">
+                  {availableModels.length > 0 ? (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {availableModels.map((model) => {
+                        const entry = (model?.entry_url ?? "").trim();
+                        if (!entry) {
+                          return null;
+                        }
+                        const isSelected = entry === selectedModelUrl;
+                        const previewSrc = model?.preview_url
+                          ? resolveAssetUrl(model.preview_url)
+                          : "";
+                        return (
+                          <button
+                            key={entry}
+                            type="button"
+                            onClick={() => handleModelSelect(entry)}
+                            className={`flex items-center gap-3 rounded-2xl border px-3 py-2 text-left text-sm transition ${
+                              isSelected
+                                ? "border-blue-400 bg-blue-50/80 text-blue-600 shadow-lg"
+                                : "border-slate-200 bg-white/70 text-slate-600 shadow-sm hover:border-blue-300 hover:bg-blue-50/60 hover:text-blue-600"
+                            }`}
+                          >
+                            {previewSrc ? (
+                              <img
+                                src={previewSrc}
+                                alt={`${model?.name ?? "Live2D"} 静态图`}
+                                className="h-12 w-12 flex-shrink-0 rounded-xl object-cover"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl bg-slate-100 text-xs text-slate-400">
+                                无图
+                              </div>
+                            )}
+                            <div className="flex flex-1 flex-col">
+                              <span className="text-sm font-medium text-slate-700">
+                                {model?.name ?? "Live2D 模型"}
+                              </span>
+                              {model?.description ? (
+                                <span className="line-clamp-2 text-xs text-slate-500">
+                                  {model.description}
+                                </span>
+                              ) : null}
+                              {isSelected ? (
+                                <span className="mt-1 text-[11px] font-medium text-blue-500">
+                                  已选择
+                                </span>
+                              ) : null}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : modelListStatus.loading ? (
+                    <p className="text-xs text-slate-400">模型列表加载中...</p>
+                  ) : (
+                    <p className="text-xs text-slate-400">
+                      暂无可用模型，可前往 Live2D 管理上传
+                    </p>
+                  )}
+                </div>
+              </section>
+
+
+              <section className="space-y-3">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <span className="text-sm font-medium text-slate-600">
                     音色选择
                   </span>
                   <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -1820,4 +1915,5 @@ voice_provider:
     </div>
   );
 }
+
 
