@@ -9,6 +9,10 @@ import AgentRatingSummary from "@/components/AgentRatingSummary";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
 const API_BASE_URL = getApiBaseUrl();
 
@@ -72,6 +76,66 @@ function clamp(number, min, max) {
   return Math.min(Math.max(number, min), max);
 }
 
+function combineClassNames(...values) {
+  return values.filter(Boolean).join(' ');
+}
+
+const MARKDOWN_COMPONENTS = {
+  p: ({ className, children }) => (
+    <p className={combineClassNames("mb-2 whitespace-pre-wrap leading-relaxed last:mb-0", className)}>
+      {children}
+    </p>
+  ),
+  ul: ({ className, children }) => (
+    <ul className={combineClassNames("mb-2 list-disc space-y-1 pl-5 last:mb-0", className)}>
+      {children}
+    </ul>
+  ),
+  ol: ({ className, children }) => (
+    <ol className={combineClassNames("mb-2 list-decimal space-y-1 pl-5 last:mb-0", className)}>
+      {children}
+    </ol>
+  ),
+  li: ({ className, children }) => (
+    <li className={combineClassNames("mb-1 last:mb-0", className)}>{children}</li>
+  ),
+  blockquote: ({ className, children }) => (
+    <blockquote className={combineClassNames("my-2 border-l-4 border-black/20 pl-3 italic", className)}>
+      {children}
+    </blockquote>
+  ),
+  pre: ({ className, children }) => (
+    <pre className={combineClassNames("my-2 overflow-x-auto rounded-xl bg-black/10 p-3 text-[0.9em]", className)}>
+      {children}
+    </pre>
+  ),
+  code: ({ inline, className, children }) => {
+    if (inline) {
+      return (
+        <code className={combineClassNames("rounded bg-black/10 px-1 py-0.5 font-mono text-[0.9em]", className)}>
+          {children}
+        </code>
+      );
+    }
+    return (
+      <code className={combineClassNames("font-mono text-[0.9em]", className)}>
+        {children}
+      </code>
+    );
+  },
+  a: ({ className, children, href, title }) => (
+    <a
+      href={href}
+      title={title}
+      className={combineClassNames("break-words underline decoration-current underline-offset-2", className)}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {children}
+    </a>
+  ),
+};
+
 const SPEECH_PLAYBACK_ERROR_HINT =
   "\u8bed\u97f3\u64ad\u653e\u5931\u8d25\uff0c\u8bf7\u70b9\u51fb\u6d88\u606f\u4e2d\u7684\u64ad\u653e\u6309\u94ae\u91cd\u8bd5\u3002";
 
@@ -80,6 +144,13 @@ const MICROPHONE_PERMISSION_ERROR =
 
 const MICROPHONE_UNSUPPORTED_ERROR =
   "当前浏览器不支持麦克风，请尝试使用最新版 Chrome 或 Edge。";
+
+const STREAMING_PLAYBACK_MAX_RETRIES = 8;
+const STREAMING_PLAYBACK_RETRY_BASE_DELAY = 140;
+const STREAMING_PLAYBACK_MAX_DELAY = 1000;
+
+const STREAMING_PLAYBACK_MESSAGE_LOOKUP_MAX_ATTEMPTS = 12;
+const STREAMING_PLAYBACK_MESSAGE_LOOKUP_BACKOFF_STEP = 120;
 
 function getSpeechString(speech, ...keys) {
   if (!speech || typeof speech !== "object") {
@@ -496,17 +567,65 @@ function normalizeMessage(message) {
   };
 }
 
-function getMessageId(message) {
-  const raw =
-    message?.id ??
-    message?.ID ??
-    message?.clientId ??
-    message?.clientID ??
-    null;
-  if (raw === null || raw === undefined) {
+function normalizeIdentifier(value) {
+  if (value === null || value === undefined) {
     return null;
   }
-  return String(raw);
+  const normalized = String(value).trim();
+  if (!normalized) {
+    return null;
+  }
+  return normalized;
+}
+
+function collectIdentifiers(...values) {
+  const identifiers = [];
+  for (const value of values) {
+    const normalized = normalizeIdentifier(value);
+    if (!normalized || identifiers.includes(normalized)) {
+      continue;
+    }
+    identifiers.push(normalized);
+  }
+  return identifiers;
+}
+
+function collectMessageIdentifiers(message) {
+  if (!message || typeof message !== "object") {
+    return [];
+  }
+  return collectIdentifiers(
+    message?.id,
+    message?.ID,
+    message?.message_id,
+    message?.messageId,
+    message?.clientId,
+    message?.clientID,
+  );
+}
+
+function collectPayloadIdentifiers(payload) {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+  return collectIdentifiers(
+    payload?.id,
+    payload?.ID,
+    payload?.message_id,
+    payload?.messageId,
+    payload?.client_id,
+    payload?.clientId,
+    payload?.uuid,
+    payload?.UUID,
+  );
+}
+
+function getMessageId(message) {
+  const identifiers = collectMessageIdentifiers(message);
+  if (identifiers.length === 0) {
+    return null;
+  }
+  return identifiers[0];
 }
 
 function getMessageKey(message) {
@@ -551,6 +670,8 @@ export default function ChatPanel({
     error: null,
   });
   const [inputValue, setInputValue] = useState("");
+  const markdownRemarkPlugins = useMemo(() => [remarkGfm, remarkMath], []);
+  const markdownRehypePlugins = useMemo(() => [rehypeKatex], []);
   const patchMessageSpeechExtras = useCallback(
     (messageId, mutate) => {
       if (messageId === null || messageId === undefined) {
@@ -1152,15 +1273,25 @@ export default function ChatPanel({
         normalized.suggestedMotion ??
         EMOTION_MOTION_FALLBACKS[normalized.label] ??
         (normalized.label === "neutral" ? "idle_emphatic" : "");
+      const amplifiedIntensity = clamp(
+        (normalized.intensity ?? 0.5) * 1.25 +
+          (normalized.label && normalized.label !== "neutral" ? 0.15 : 0.05),
+        0,
+        1,
+      );
+      const boostedEmotion = {
+        ...normalized,
+        intensity: amplifiedIntensity,
+      };
       try {
-        controls.setEmotion?.(normalized);
+        controls.setEmotion?.(boostedEmotion);
         if (controls.setMouthOpen) {
           const target = clamp(
-            0.3 + (normalized.intensity ?? 0.55) * 0.55,
+            0.36 + (boostedEmotion.intensity ?? 0.6) * 0.6,
             0,
-            0.95,
+            0.97,
           );
-          controls.setMouthOpen(target, 220);
+          controls.setMouthOpen(target, 250);
         }
       } catch (error) {
         console.warn("Live2D setEmotion failed", error);
@@ -1168,7 +1299,7 @@ export default function ChatPanel({
       if (motionKey) {
         try {
           controls.playMotion?.(motionKey, {
-            intensity: clamp((normalized.intensity ?? 0.6) * 1.1, 0.2, 1),
+            intensity: clamp((boostedEmotion.intensity ?? 0.65) * 1.2, 0.3, 1),
           });
         } catch (error) {
           console.warn("Live2D playMotion failed", error);
@@ -1181,13 +1312,16 @@ export default function ChatPanel({
       const duration =
         typeof holdMs === "number" && holdMs >= 0
           ? holdMs
-          : Math.max(1800, Math.floor((normalized.intensity ?? 0.5) * 4800));
+          : Math.max(
+              2000,
+              Math.floor((boostedEmotion.intensity ?? 0.55) * 5200),
+            );
       ambientEmotionTimeoutRef.current = window.setTimeout(() => {
         try {
-          controls.setEmotion?.({ label: "neutral", intensity: 0.32 });
+          controls.setEmotion?.({ label: "neutral", intensity: 0.4 });
           controls.clearEmotion?.();
           if (controls.setMouthOpen) {
-            controls.setMouthOpen(0.18, 200);
+            controls.setMouthOpen(0.22, 240);
           }
         } catch (error) {
           console.warn("Live2D reset emotion failed", error);
@@ -1293,9 +1427,12 @@ export default function ChatPanel({
     const normalizedEmotion = normalizeEmotionMeta(next.emotion);
     const speech = next.speech;
     const streamingSession = next.streamingSession ?? getStreamingSession(next.id);
+    const streamingRetryCount = Number(next.streamingRetryCount ?? 0);
     let audio = null;
     let usedStreamingAudio = false;
     let primedStreamingAudio = null;
+    let streamingPlayable = false;
+    let streamingPending = false;
     if (streamingSession && typeof streamingSession.getAudioElement === "function") {
       try {
         primedStreamingAudio = streamingSession.getAudioElement();
@@ -1305,10 +1442,16 @@ export default function ChatPanel({
     }
     if (
       streamingSession &&
-      typeof streamingSession.isPlayable === "function" &&
-      streamingSession.isPlayable() &&
-      primedStreamingAudio
+      typeof streamingSession.isPlayable === "function"
     ) {
+      try {
+        streamingPlayable = Boolean(streamingSession.isPlayable());
+        streamingPending = !streamingPlayable;
+      } catch (error) {
+        console.warn("streaming session isPlayable check failed", error);
+      }
+    }
+    if (streamingPlayable && primedStreamingAudio) {
       audio = primedStreamingAudio;
       usedStreamingAudio = true;
       logCosyVoiceDebug("using streaming audio element", {
@@ -1318,7 +1461,7 @@ export default function ChatPanel({
 
     const base64Source = getSpeechString(speech, "audio_base64", "audioBase64");
     const audioUrl = getSpeechString(speech, "audio_url", "audioUrl");
-    if (!audio && audioUrl) {
+    if (!audio && audioUrl && (!streamingPending || streamingRetryCount >= STREAMING_PLAYBACK_MAX_RETRIES)) {
       let resolvedUrl = audioUrl;
       try {
         resolvedUrl = new URL(audioUrl, API_BASE_URL).toString();
@@ -1338,7 +1481,7 @@ export default function ChatPanel({
         url: resolvedUrl,
       });
     }
-    if (!audio && base64Source) {
+    if (!audio && base64Source && (!streamingPending || streamingRetryCount >= STREAMING_PLAYBACK_MAX_RETRIES)) {
       const mime =
         getSpeechString(speech, "mime_type", "mimeType", "mime") ||
         "audio/mpeg";
@@ -1354,22 +1497,33 @@ export default function ChatPanel({
       });
     }
     if (!audio) {
-      if (
-        streamingSession &&
-        typeof streamingSession.isPlayable === "function" &&
-        !streamingSession.isPlayable() &&
-        typeof window !== "undefined"
-      ) {
-        speechQueueRef.current.unshift({ ...next, streamingSession });
-        logCosyVoiceDebug("streaming audio not ready yet, retrying", {
+      if (streamingPending && typeof window !== "undefined") {
+        if (streamingRetryCount < STREAMING_PLAYBACK_MAX_RETRIES) {
+          const backoff = Math.min(
+            STREAMING_PLAYBACK_RETRY_BASE_DELAY + streamingRetryCount * 120,
+            STREAMING_PLAYBACK_MAX_DELAY,
+          );
+          speechQueueRef.current.unshift({
+            ...next,
+            streamingSession,
+            streamingRetryCount: streamingRetryCount + 1,
+          });
+          logCosyVoiceDebug("streaming audio not ready yet, retrying", {
+            messageId: next.id,
+            retry: streamingRetryCount + 1,
+            delay: backoff,
+          });
+          window.setTimeout(() => {
+            if (!currentSpeechRef.current) {
+              scheduleNextSpeech();
+            }
+          }, backoff);
+          return;
+        }
+        logCosyVoiceDebug("streaming playback fallback after retries", {
           messageId: next.id,
+          retries: streamingRetryCount,
         });
-        window.setTimeout(() => {
-          if (!currentSpeechRef.current) {
-            scheduleNextSpeech();
-          }
-        }, 120);
-        return;
       }
       logCosyVoiceDebug("no audio source available for message", {
         messageId: next.id,
@@ -1692,6 +1846,7 @@ export default function ChatPanel({
         speech,
         emotion,
         streamingSession,
+        streamingRetryCount: Number(message?.streamingRetryCount ?? 0),
       });
       logCosyVoiceDebug("enqueued speech playback", {
         messageId: id,
@@ -2962,11 +3117,14 @@ export default function ChatPanel({
           lastAssistant = normalized;
           setMessages((prev) => {
             let replaced = false;
+            const normalizedKeys = collectMessageIdentifiers(normalized);
+            const normalizedKeySet = new Set(normalizedKeys);
             const updated = prev.map((item) => {
-              if (
-                String(item?.id ?? item?.ID ?? item?.clientId ?? "") ===
-                String(normalized.id ?? normalized.ID ?? "")
-              ) {
+              const itemKeys = collectMessageIdentifiers(item);
+              const matches =
+                normalizedKeySet.size > 0 &&
+                itemKeys.some((key) => normalizedKeySet.has(key));
+              if (matches) {
                 replaced = true;
                 return normalized;
               }
@@ -2984,13 +3142,24 @@ export default function ChatPanel({
             handleAssistantFinal(normalized);
           }
         };
-        const applyAssistantDelta = (messageId, content) => {
-          if (!messageId) {
+        const applyAssistantDelta = (identifierCandidates, content) => {
+          const keys = Array.isArray(identifierCandidates)
+            ? Array.from(
+                new Set(
+                  identifierCandidates
+                    .map((value) => normalizeIdentifier(value))
+                    .filter(Boolean),
+                ),
+              )
+            : [];
+          if (keys.length === 0) {
             return;
           }
+          const keySet = new Set(keys);
           setMessages((prev) =>
             prev.map((item) => {
-              if (String(item?.id ?? item?.ID ?? "") === String(messageId)) {
+              const itemKeys = collectMessageIdentifiers(item);
+              if (itemKeys.some((key) => keySet.has(key))) {
                 return { ...item, content };
               }
               return item;
@@ -3040,11 +3209,11 @@ export default function ChatPanel({
               break;
             }
             case "assistant_delta": {
-              const targetId = payload?.id ?? payload?.ID ?? null;
+              const identifiers = collectPayloadIdentifiers(payload);
               const full =
                 typeof payload?.full === "string" ? payload.full : "";
-              if (targetId && full) {
-                applyAssistantDelta(targetId, full);
+              if (identifiers.length > 0 && full) {
+                applyAssistantDelta(identifiers, full);
                 unlockSending();
               }
               break;
@@ -3125,13 +3294,19 @@ export default function ChatPanel({
                     delete extras.speech_error;
                   }
                 });
+                let streamingPlaybackAttempt = 0;
+                let sessionInstance = null;
                 const queueStreamingPlayback = () => {
+                  if (!sessionInstance || sessionInstance.destroyed) {
+                    return;
+                  }
                   const currentMessage = messagesRef.current.find(
                     (item) =>
                       String(item?.id ?? item?.ID ?? item?.clientId ?? "") ===
                       String(messageId),
                   );
                   if (currentMessage) {
+                    streamingPlaybackAttempt = 0;
                     logCosyVoiceDebug("queueStreamingPlayback", { messageId });
                     registerSpeech(currentMessage, {
                       enqueue: true,
@@ -3139,11 +3314,37 @@ export default function ChatPanel({
                       markPlayed: false,
                       interrupt: true,
                     });
-                  } else {
-                    logCosyVoiceDebug("queueStreamingPlayback skipped: message not found", { messageId });
+                    return;
                   }
+                  if (typeof window === "undefined") {
+                    return;
+                  }
+                  if (streamingPlaybackAttempt >= STREAMING_PLAYBACK_MESSAGE_LOOKUP_MAX_ATTEMPTS) {
+                    logCosyVoiceDebug("queueStreamingPlayback abandoned", {
+                      messageId,
+                      attempts: streamingPlaybackAttempt,
+                    });
+                    return;
+                  }
+                  streamingPlaybackAttempt += 1;
+                  const delay = Math.min(
+                    STREAMING_PLAYBACK_RETRY_BASE_DELAY +
+                      streamingPlaybackAttempt * STREAMING_PLAYBACK_MESSAGE_LOOKUP_BACKOFF_STEP,
+                    STREAMING_PLAYBACK_MAX_DELAY,
+                  );
+                  logCosyVoiceDebug("queueStreamingPlayback waiting", {
+                    messageId,
+                    attempt: streamingPlaybackAttempt,
+                    delay,
+                  });
+                  window.setTimeout(() => {
+                    const activeSession = getStreamingSession(messageId);
+                    if (activeSession === sessionInstance && !sessionInstance.destroyed) {
+                      queueStreamingPlayback();
+                    }
+                  }, delay);
                 };
-                const session = new StreamingAudioSession({
+                sessionInstance = new StreamingAudioSession({
                   mimeType,
                   onFirstPlayable: queueStreamingPlayback,
                   onError: (error) => {
@@ -3152,7 +3353,7 @@ export default function ChatPanel({
                   debug: true,
                   debugLabel: messageId,
                 });
-                setStreamingSession(messageId, session);
+                setStreamingSession(messageId, sessionInstance);
                 logCosyVoiceDebug("streaming session created", { messageId, mimeType, format });
                 queueStreamingPlayback();
               }
@@ -4018,9 +4219,15 @@ export default function ChatPanel({
                       <div className="flex max-w-[80%] items-start gap-3">
                         <div className="flex max-w-full flex-col items-end">
                           <div
-                            className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
+                            className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
                           >
-                            {displayContent}
+                            <ReactMarkdown
+                              remarkPlugins={markdownRemarkPlugins}
+                              rehypePlugins={markdownRehypePlugins}
+                              components={MARKDOWN_COMPONENTS}
+                            >
+                              {displayContent || ""}
+                            </ReactMarkdown>
                           </div>
                           <span className="mt-1 text-xs text-right text-gray-400">
                             {userDisplayName}
@@ -4050,9 +4257,15 @@ export default function ChatPanel({
                     ) : (
                       <div className="flex max-w-[80%] flex-col items-start">
                         <div
-                          className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
+                          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
                         >
-                          {displayContent}
+                          <ReactMarkdown
+                            remarkPlugins={markdownRemarkPlugins}
+                            rehypePlugins={markdownRehypePlugins}
+                            components={MARKDOWN_COMPONENTS}
+                          >
+                            {displayContent || ""}
+                          </ReactMarkdown>
                         </div>
                         <span className="mt-1 text-xs text-left text-gray-400">
                           {agent?.name ?? role}

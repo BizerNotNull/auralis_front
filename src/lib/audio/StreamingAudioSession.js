@@ -104,6 +104,8 @@ export default class StreamingAudioSession {
       this.mediaSource = new MediaSource();
       this.handleSourceOpen = this.handleSourceOpen.bind(this);
       this.handleSourceEnded = this.handleSourceEnded.bind(this);
+      this.handleSourceBufferUpdateEnd = this.handleSourceBufferUpdateEnd.bind(this);
+      this.handleSourceBufferError = this.handleSourceBufferError.bind(this);
       this.mediaSource.addEventListener("sourceopen", this.handleSourceOpen);
       this.mediaSource.addEventListener("sourceended", this.handleSourceEnded);
       this.objectUrl = URL.createObjectURL(this.mediaSource);
@@ -120,26 +122,45 @@ export default class StreamingAudioSession {
     try {
       this.sourceBuffer = this.mediaSource.addSourceBuffer(this.supportedMimeType);
       this.sourceBuffer.mode = "sequence";
-      this.sourceBuffer.addEventListener("updateend", () => {
-        this.flushQueue();
-        this.checkFirstPlayable();
-        if (this.finalized && this.queue.length === 0 && !this.sourceBuffer.updating) {
-          this.endStreamSafely();
-        }
-      });
-      this.sourceBuffer.addEventListener("error", (event) => {
-        this.debugLog("source buffer error", event);
-        if (typeof this.onError === "function") {
-          this.onError(event);
-        }
-      });
+      this.sourceBuffer.addEventListener("updateend", this.handleSourceBufferUpdateEnd);
+      this.sourceBuffer.addEventListener("error", this.handleSourceBufferError);
       this.debugLog("source buffer initialised");
       this.flushQueue();
+      this.checkFirstPlayable();
     } catch (error) {
       this.debugLog("handleSourceOpen failure", error);
       if (typeof this.onError === "function") {
         this.onError(error);
       }
+    }
+  }
+
+  handleSourceBufferUpdateEnd() {
+    if (this.destroyed || !this.sourceBuffer) {
+      return;
+    }
+    try {
+      this.flushQueue();
+      this.checkFirstPlayable();
+      const idleBuffer = !this.sourceBuffer || !this.sourceBuffer.updating;
+      if (this.finalized && this.queue.length === 0 && idleBuffer) {
+        this.endStreamSafely();
+      }
+    } catch (error) {
+      this.debugLog("handleSourceBufferUpdateEnd failure", error);
+      if (typeof this.onError === "function") {
+        this.onError(error);
+      }
+    }
+  }
+
+  handleSourceBufferError(event) {
+    if (this.destroyed) {
+      return;
+    }
+    this.debugLog("source buffer error", event);
+    if (typeof this.onError === "function") {
+      this.onError(event);
     }
   }
 
@@ -258,6 +279,8 @@ export default class StreamingAudioSession {
     if (this.streamingSupported) {
       if (this.sourceBuffer && !this.sourceBuffer.updating) {
         this.endStreamSafely();
+      } else if (!this.sourceBuffer) {
+        this.endStreamSafely();
       }
     }
   }
@@ -365,6 +388,14 @@ export default class StreamingAudioSession {
       }
       this.mediaSource.removeEventListener("sourceopen", this.handleSourceOpen);
       this.mediaSource.removeEventListener("sourceended", this.handleSourceEnded);
+    }
+    if (this.sourceBuffer) {
+      try {
+        this.sourceBuffer.removeEventListener("updateend", this.handleSourceBufferUpdateEnd);
+        this.sourceBuffer.removeEventListener("error", this.handleSourceBufferError);
+      } catch (error) {
+        this.debugLog("removeEventListener on sourceBuffer failed", error);
+      }
     }
     if (this.objectUrl) {
       try {
