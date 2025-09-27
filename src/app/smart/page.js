@@ -140,7 +140,7 @@ export default function AgentDirectoryPage() {
               智能体总览
             </h1>
             <p className="max-w-2xl text-sm text-slate-500">
-              使用本页面分页浏览所有已创建的智能体，提供头像预留位，方便后续为每位智能体上传专属形象。
+              浏览所有已创建的智能体。
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3 self-start">

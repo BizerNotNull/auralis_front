@@ -302,7 +302,7 @@ const Live2DContainer = forwardRef(function Live2DContainer(
     label: "neutral",
     targets: {},
     expiresAt: 0,
-    intensity: 0.4,
+    intensity: 0.5,
   });
   const motionStateRef = useRef(null);
   const controlsRef = useRef(null);
@@ -366,7 +366,7 @@ const Live2DContainer = forwardRef(function Live2DContainer(
 
     const params = {};
     for (const [param, value] of Object.entries(preset.params ?? {})) {
-      params[param] = value * (0.4 + intensity * 0.6);
+      params[param] = value * (0.55 + intensity * 0.75);
     }
 
     motionStateRef.current = {
@@ -385,7 +385,7 @@ const Live2DContainer = forwardRef(function Live2DContainer(
         emotionStateRef.current = {
           label: "neutral",
           targets,
-          intensity: 0.35,
+          intensity: 0.4,
           expiresAt: time + 1200,
           mouthBoost: 0,
         };
@@ -415,15 +415,24 @@ const Live2DContainer = forwardRef(function Live2DContainer(
               ? emotion.Intensity
               : 0.5
           : 0.5;
-      const intensity = clamp(rawIntensity, 0, 1);
+      const baseIntensity = clamp(rawIntensity, 0, 1);
+      const intensity =
+        presetKey === "neutral"
+          ? clamp(baseIntensity * 1.1 + 0.05, 0, 0.85)
+          : clamp(baseIntensity * 1.35 + 0.12, 0, 1);
 
       const preset = EMOTION_PRESETS[presetKey] ?? EMOTION_PRESETS.neutral;
       let mouthBoost = 0;
+      const stretchBase = presetKey === "neutral" ? 0.55 : 0.7;
 
       for (const [param, value] of Object.entries(preset)) {
-        const scaled = value * (0.4 + intensity * 0.6);
+        const scaled = clamp(
+          value * (stretchBase + intensity * 0.85),
+          -1.25,
+          1.25,
+        );
         if (param === "ParamMouthOpenY") {
-          mouthBoost = clamp(Math.abs(scaled), 0, 1);
+          mouthBoost = clamp(Math.abs(scaled) * 1.05, 0, 1);
         } else {
           targets[param] = scaled;
         }
@@ -437,7 +446,7 @@ const Live2DContainer = forwardRef(function Live2DContainer(
             emotion.DurationMs ??
             null)
           : null;
-      let duration = 2000 + intensity * 2000;
+      let duration = 2400 + intensity * 2600;
       const holdDurationNumber = Number(holdDurationSource);
       if (Number.isFinite(holdDurationNumber) && holdDurationNumber > 0) {
         duration = clamp(holdDurationNumber, 600, 8000);
@@ -479,7 +488,7 @@ const Live2DContainer = forwardRef(function Live2DContainer(
     }
 
     const target = Math.max(state.target, emotion?.mouthBoost ?? 0);
-    const smoothing = target > state.value ? 0.35 : 0.22;
+    const smoothing = target > state.value ? 0.42 : 0.28;
     const next = state.value + (target - state.value) * smoothing;
     state.value = clamp(next, 0, 1);
 
@@ -509,15 +518,15 @@ const Live2DContainer = forwardRef(function Live2DContainer(
       emotionStateRef.current = {
         label: "neutral",
         targets: createEmotionTargetBaseline(),
-        intensity: 0.3,
-        expiresAt: time + 1000,
+        intensity: 0.35,
+        expiresAt: time + 1200,
         mouthBoost: 0,
       };
     }
 
     const active = emotionStateRef.current;
     const targets = active.targets ?? {};
-    const lerpStrength = 0.12 + (active.intensity ?? 0.3) * 0.12;
+    const lerpStrength = clamp(0.18 + (active.intensity ?? 0.35) * 0.2, 0.18, 0.45);
 
     for (const param of KNOWN_EMOTION_PARAMS) {
       if (param === "ParamMouthOpenY") {

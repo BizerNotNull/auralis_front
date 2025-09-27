@@ -38,6 +38,8 @@ const DEFAULT_LIVE2D_MODEL = {
 
 const VOICE_PREVIEW_SAMPLE = "你好,欢迎来到Auralis";
 
+const PREFERRED_VOICE_PROVIDER_ID = "aliyun-cosyvoice";
+
 const INITIAL_FORM_VALUES = {
   name: "",
   one_sentence_intro: "",
@@ -50,7 +52,7 @@ const INITIAL_FORM_VALUES = {
   max_tokens: "1024",
   live2d_model_id: "",
   voice_id: "",
-  voice_provider: "",
+  voice_provider: PREFERRED_VOICE_PROVIDER_ID,
   avatar_url: "",
   status: "",
 };
@@ -250,7 +252,7 @@ export default function CreateAgentPage() {
   });
   const [voiceOptions, setVoiceOptions] = useState([]);
   const [voiceProviders, setVoiceProviders] = useState([]);
-  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState("");
+  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState(PREFERRED_VOICE_PROVIDER_ID);
   const [voicePreviewStatus, setVoicePreviewStatus] = useState({
     loading: false,
     voiceId: "",
@@ -444,27 +446,70 @@ export default function CreateAgentPage() {
           }))
           .filter((item) => item.id);
 
+        const providerIdLookup = new Map();
+        normalizedProviders.forEach((item) => {
+          const key = item.id.toLowerCase();
+          if (!providerIdLookup.has(key)) {
+            providerIdLookup.set(key, item.id);
+          }
+        });
+        voices.forEach((voice) => {
+          const providerId = String(
+            voice?.provider ?? voice?.Provider ?? "",
+          ).trim();
+          if (!providerId) {
+            return;
+          }
+          const key = providerId.toLowerCase();
+          if (!providerIdLookup.has(key)) {
+            providerIdLookup.set(key, providerId);
+          }
+        });
+        const resolveProviderCandidate = (candidate) => {
+          const normalized = String(candidate ?? "")
+            .trim()
+            .toLowerCase();
+          if (!normalized) {
+            return "";
+          }
+          return providerIdLookup.get(normalized) ?? "";
+        };
+
         const determineDefaultProvider = () => {
-          const existing = String(initialVoiceProviderRef.current ?? "").trim();
+          const existing = resolveProviderCandidate(
+            initialVoiceProviderRef.current,
+          );
           if (existing) {
             return existing;
           }
-          if (defaultProviderFromAPI) {
-            return defaultProviderFromAPI;
+          const preferredByConfig = resolveProviderCandidate(
+            PREFERRED_VOICE_PROVIDER_ID,
+          );
+          if (preferredByConfig) {
+            return preferredByConfig;
           }
-          const active = normalizedProviders.find((item) => item.enabled);
+          const apiDefault = resolveProviderCandidate(defaultProviderFromAPI);
+          if (apiDefault) {
+            return apiDefault;
+          }
+          const active = normalizedProviders.find((item) =>
+            resolveProviderCandidate(item.id),
+          );
           if (active) {
-            return active.id;
+            return resolveProviderCandidate(active.id);
           }
-          if (normalizedProviders.length > 0) {
-            return normalizedProviders[0].id;
+          for (const item of normalizedProviders) {
+            const resolved = resolveProviderCandidate(item.id);
+            if (resolved) {
+              return resolved;
+            }
           }
-          if (voices.length > 0) {
-            const providerId = String(
-              voices[0]?.provider ?? voices[0]?.Provider ?? "",
-            ).trim();
-            if (providerId) {
-              return providerId;
+          for (const voice of voices) {
+            const resolved = resolveProviderCandidate(
+              voice?.provider ?? voice?.Provider ?? "",
+            );
+            if (resolved) {
+              return resolved;
             }
           }
           return "";
@@ -699,8 +744,28 @@ voice_provider:
   }, [values.voice_id, voiceOptions]);
 
   const availableVoiceProviders = useMemo(() => {
+    const reorderProviders = (list) => {
+      if (!Array.isArray(list) || list.length === 0) {
+        return [];
+      }
+      const normalizedPreferred = PREFERRED_VOICE_PROVIDER_ID.toLowerCase();
+      const preferred = [];
+      const others = [];
+      list.forEach((item) => {
+        const normalizedId = String(item?.id ?? "")
+          .trim()
+          .toLowerCase();
+        if (normalizedId && normalizedId === normalizedPreferred) {
+          preferred.push(item);
+        } else {
+          others.push(item);
+        }
+      });
+      return [...preferred, ...others];
+    };
+
     if (voiceProviders.length > 0) {
-      return voiceProviders
+      const normalizedList = voiceProviders
         .map((item) => {
           const id = String(item?.id ?? "").trim();
           if (!id) {
@@ -714,6 +779,7 @@ voice_provider:
           };
         })
         .filter(Boolean);
+      return reorderProviders(normalizedList);
     }
 
     const uniqueProviders = new Map();
@@ -728,7 +794,7 @@ voice_provider:
         enabled: true,
       });
     });
-    return Array.from(uniqueProviders.values());
+    return reorderProviders(Array.from(uniqueProviders.values()));
   }, [voiceOptions, voiceProviders]);
 
   const voiceSearchToken = useMemo(
@@ -951,11 +1017,26 @@ voice_provider:
 
   const handleModelSelect = useCallback(
     (entryUrl) => {
-      setValues((prev) => ({
-        ...prev,
+      const normalized =
+        typeof entryUrl === "string" ? entryUrl.trim() : "";
 
-        live2d_model_id: entryUrl,
-      }));
+      if (!normalized) {
+        return;
+      }
+
+      setValues((prev) => {
+        const current = (prev.live2d_model_id ?? "").trim();
+
+        if (current === normalized) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+
+          live2d_model_id: normalized,
+        };
+      });
     },
 
     [setValues],
@@ -1492,6 +1573,86 @@ voice_provider:
               <section className="space-y-3">
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                   <span className="text-sm font-medium text-slate-600">
+                    Live2D 模型
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    {modelListStatus.loading ? (
+                      <span className="text-slate-400">模型列表加载中...</span>
+                    ) : null}
+                    {modelListStatus.error ? (
+                      <span className="text-rose-500">{modelListStatus.error}</span>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white/80 p-3 shadow-inner">
+                  {availableModels.length > 0 ? (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {availableModels.map((model) => {
+                        const entry = (model?.entry_url ?? "").trim();
+                        if (!entry) {
+                          return null;
+                        }
+                        const isSelected = entry === selectedModelUrl;
+                        const previewSrc = model?.preview_url
+                          ? resolveAssetUrl(model.preview_url)
+                          : "";
+                        return (
+                          <button
+                            key={entry}
+                            type="button"
+                            onClick={() => handleModelSelect(entry)}
+                            className={`flex items-center gap-3 rounded-2xl border px-3 py-2 text-left text-sm transition ${
+                              isSelected
+                                ? "border-blue-400 bg-blue-50/80 text-blue-600 shadow-lg"
+                                : "border-slate-200 bg-white/70 text-slate-600 shadow-sm hover:border-blue-300 hover:bg-blue-50/60 hover:text-blue-600"
+                            }`}
+                          >
+                            {previewSrc ? (
+                              <img
+                                src={previewSrc}
+                                alt={`${model?.name ?? "Live2D"} 静态图`}
+                                className="h-12 w-12 flex-shrink-0 rounded-xl object-cover"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl bg-slate-100 text-xs text-slate-400">
+                                无图
+                              </div>
+                            )}
+                            <div className="flex flex-1 flex-col">
+                              <span className="text-sm font-medium text-slate-700">
+                                {model?.name ?? "Live2D 模型"}
+                              </span>
+                              {model?.description ? (
+                                <span className="line-clamp-2 text-xs text-slate-500">
+                                  {model.description}
+                                </span>
+                              ) : null}
+                              {isSelected ? (
+                                <span className="mt-1 text-[11px] font-medium text-blue-500">
+                                  已选择
+                                </span>
+                              ) : null}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : modelListStatus.loading ? (
+                    <p className="text-xs text-slate-400">模型列表加载中...</p>
+                  ) : (
+                    <p className="text-xs text-slate-400">
+                      暂无可用模型，可前往 Live2D 管理上传
+                    </p>
+                  )}
+                </div>
+              </section>
+
+
+              <section className="space-y-3">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <span className="text-sm font-medium text-slate-600">
                     音色选择
                   </span>
                   <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -1501,6 +1662,7 @@ voice_provider:
                     {voiceStatus.error ? (
                       <span className="text-rose-500">{voiceStatus.error}</span>
                     ) : null}
+                    <span className="text-slate-400">推荐使用cosyvoice,延迟更低</span>
                   </div>
                 </div>
 
@@ -1665,7 +1827,7 @@ voice_provider:
                     required
                     maxLength={100}
                     className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                    placeholder="例如：云岚助理"
+                    placeholder="例如：苏格拉底"
                   />
                 </label>
 
@@ -1820,4 +1982,5 @@ voice_provider:
     </div>
   );
 }
+
 

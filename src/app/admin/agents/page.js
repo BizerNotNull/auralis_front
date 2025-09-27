@@ -1,8 +1,8 @@
-/* eslint-disable @next/next/no-img-element */
+﻿/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
 import {
@@ -14,6 +14,8 @@ import {
 
 const API_BASE_URL = getApiBaseUrl();
 const VOICE_PREVIEW_SAMPLE = "你好，欢迎来到Auralis";
+const PREFERRED_VOICE_PROVIDER_ID = "aliyun-cosyvoice";
+
 
 function findDefaultVoiceForProvider(providerId, voiceProviders, voiceOptions) {
   const normalized = String(providerId ?? "").trim().toLowerCase();
@@ -438,27 +440,70 @@ export default function AdminAgentsPage() {
           }))
           .filter((item) => item.id);
 
+        const providerIdLookup = new Map();
+        normalizedProviders.forEach((item) => {
+          const key = item.id.toLowerCase();
+          if (!providerIdLookup.has(key)) {
+            providerIdLookup.set(key, item.id);
+          }
+        });
+        voices.forEach((voice) => {
+          const providerId = String(
+            voice?.provider ?? voice?.Provider ?? "",
+          ).trim();
+          if (!providerId) {
+            return;
+          }
+          const key = providerId.toLowerCase();
+          if (!providerIdLookup.has(key)) {
+            providerIdLookup.set(key, providerId);
+          }
+        });
+        const resolveProviderCandidate = (candidate) => {
+          const normalized = String(candidate ?? "")
+            .trim()
+            .toLowerCase();
+          if (!normalized) {
+            return "";
+          }
+          return providerIdLookup.get(normalized) ?? "";
+        };
+
         const determineDefaultProvider = () => {
-          const existing = String(initialVoiceProviderRef.current ?? "").trim();
+          const existing = resolveProviderCandidate(
+            initialVoiceProviderRef.current,
+          );
           if (existing) {
             return existing;
           }
-          if (defaultProviderFromAPI) {
-            return defaultProviderFromAPI;
+          const preferredByConfig = resolveProviderCandidate(
+            PREFERRED_VOICE_PROVIDER_ID,
+          );
+          if (preferredByConfig) {
+            return preferredByConfig;
           }
-          const active = normalizedProviders.find((item) => item.enabled);
+          const apiDefault = resolveProviderCandidate(defaultProviderFromAPI);
+          if (apiDefault) {
+            return apiDefault;
+          }
+          const active = normalizedProviders.find((item) =>
+            resolveProviderCandidate(item.id),
+          );
           if (active) {
-            return active.id;
+            return resolveProviderCandidate(active.id);
           }
-          if (normalizedProviders.length > 0) {
-            return normalizedProviders[0].id;
+          for (const item of normalizedProviders) {
+            const resolved = resolveProviderCandidate(item.id);
+            if (resolved) {
+              return resolved;
+            }
           }
-          if (voices.length > 0) {
-            const providerId = String(
-              voices[0]?.provider ?? voices[0]?.Provider ?? "",
-            ).trim();
-            if (providerId) {
-              return providerId;
+          for (const voice of voices) {
+            const resolved = resolveProviderCandidate(
+              voice?.provider ?? voice?.Provider ?? "",
+            );
+            if (resolved) {
+              return resolved;
             }
           }
           return "";
@@ -574,8 +619,28 @@ export default function AdminAgentsPage() {
   }, [formValues.voice_id, voiceOptions]);
 
   const availableVoiceProviders = useMemo(() => {
+    const reorderProviders = (list) => {
+      if (!Array.isArray(list) || list.length === 0) {
+        return [];
+      }
+      const normalizedPreferred = PREFERRED_VOICE_PROVIDER_ID.toLowerCase();
+      const preferred = [];
+      const others = [];
+      list.forEach((item) => {
+        const normalizedId = String(item?.id ?? "")
+          .trim()
+          .toLowerCase();
+        if (normalizedId && normalizedId === normalizedPreferred) {
+          preferred.push(item);
+        } else {
+          others.push(item);
+        }
+      });
+      return [...preferred, ...others];
+    };
+
     if (voiceProviders.length > 0) {
-      return voiceProviders
+      const normalizedList = voiceProviders
         .map((item) => {
           const id = String(item?.id ?? "").trim();
           if (!id) {
@@ -589,6 +654,7 @@ export default function AdminAgentsPage() {
           };
         })
         .filter(Boolean);
+      return reorderProviders(normalizedList);
     }
 
     const uniqueProviders = new Map();
@@ -603,7 +669,7 @@ export default function AdminAgentsPage() {
         enabled: true,
       });
     });
-    return Array.from(uniqueProviders.values());
+    return reorderProviders(Array.from(uniqueProviders.values()));
   }, [voiceOptions, voiceProviders]);
 
   const voiceSearchToken = useMemo(
@@ -1624,6 +1690,7 @@ export default function AdminAgentsPage() {
                             {filteredVoiceOptions.length} 个候选
                           </span>
                         ) : null}
+                    <span className="text-slate-400">推荐使用cosyvoice,双流式传输延迟更低</span>
                       </div>
                     </div>
 

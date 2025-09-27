@@ -4,6 +4,7 @@ import Link from "next/link";
 import { cookies, headers } from "next/headers";
 
 import { resolveAssetUrl } from "@/lib/media";
+import { AdminRequestLink } from "@/components/home/AdminRequestLink";
 
 export const dynamic = "force-dynamic";
 
@@ -280,7 +281,7 @@ export default async function Home() {
         <header className="flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3">
             <Image
-              src="/next.svg"
+              src="/Auralis.png"
               alt="Auralis"
               width={120}
               height={28}
@@ -383,7 +384,7 @@ export default async function Home() {
                 aria-hidden
               />
               <Image
-                src="/vercel.svg"
+                src="/auralis_big.png"
                 alt="Platform preview"
                 width={360}
                 height={360}
@@ -546,9 +547,15 @@ export default async function Home() {
         </main>
 
         <footer className="mt-12 border-t border-slate-200 pt-6 text-sm text-slate-500">
-          <p>
-            Copyright {new Date().getFullYear()} Auralis By Bizer.
-            保留所有权利。
+          <p className="flex flex-wrap items-center gap-3">
+            <span>
+              Copyright {new Date().getFullYear()} Auralis By Bizer. 保留所有权利。
+            </span>
+            <AdminRequestLink
+              disabled={!loggedIn}
+              userId={user?.id ?? null}
+              username={user?.username ?? ""}
+            />
           </p>
         </footer>
       </div>

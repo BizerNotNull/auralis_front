@@ -4,10 +4,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
+import StreamingAudioSession from "@/lib/audio/StreamingAudioSession";
 import AgentRatingSummary from "@/components/AgentRatingSummary";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
 const API_BASE_URL = getApiBaseUrl();
 
@@ -71,6 +76,66 @@ function clamp(number, min, max) {
   return Math.min(Math.max(number, min), max);
 }
 
+function combineClassNames(...values) {
+  return values.filter(Boolean).join(' ');
+}
+
+const MARKDOWN_COMPONENTS = {
+  p: ({ className, children }) => (
+    <p className={combineClassNames("mb-2 whitespace-pre-wrap leading-relaxed last:mb-0", className)}>
+      {children}
+    </p>
+  ),
+  ul: ({ className, children }) => (
+    <ul className={combineClassNames("mb-2 list-disc space-y-1 pl-5 last:mb-0", className)}>
+      {children}
+    </ul>
+  ),
+  ol: ({ className, children }) => (
+    <ol className={combineClassNames("mb-2 list-decimal space-y-1 pl-5 last:mb-0", className)}>
+      {children}
+    </ol>
+  ),
+  li: ({ className, children }) => (
+    <li className={combineClassNames("mb-1 last:mb-0", className)}>{children}</li>
+  ),
+  blockquote: ({ className, children }) => (
+    <blockquote className={combineClassNames("my-2 border-l-4 border-black/20 pl-3 italic", className)}>
+      {children}
+    </blockquote>
+  ),
+  pre: ({ className, children }) => (
+    <pre className={combineClassNames("my-2 overflow-x-auto rounded-xl bg-black/10 p-3 text-[0.9em]", className)}>
+      {children}
+    </pre>
+  ),
+  code: ({ inline, className, children }) => {
+    if (inline) {
+      return (
+        <code className={combineClassNames("rounded bg-black/10 px-1 py-0.5 font-mono text-[0.9em]", className)}>
+          {children}
+        </code>
+      );
+    }
+    return (
+      <code className={combineClassNames("font-mono text-[0.9em]", className)}>
+        {children}
+      </code>
+    );
+  },
+  a: ({ className, children, href, title }) => (
+    <a
+      href={href}
+      title={title}
+      className={combineClassNames("break-words underline decoration-current underline-offset-2", className)}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {children}
+    </a>
+  ),
+};
+
 const SPEECH_PLAYBACK_ERROR_HINT =
   "\u8bed\u97f3\u64ad\u653e\u5931\u8d25\uff0c\u8bf7\u70b9\u51fb\u6d88\u606f\u4e2d\u7684\u64ad\u653e\u6309\u94ae\u91cd\u8bd5\u3002";
 
@@ -79,6 +144,13 @@ const MICROPHONE_PERMISSION_ERROR =
 
 const MICROPHONE_UNSUPPORTED_ERROR =
   "当前浏览器不支持麦克风，请尝试使用最新版 Chrome 或 Edge。";
+
+const STREAMING_PLAYBACK_MAX_RETRIES = 8;
+const STREAMING_PLAYBACK_RETRY_BASE_DELAY = 140;
+const STREAMING_PLAYBACK_MAX_DELAY = 1000;
+
+const STREAMING_PLAYBACK_MESSAGE_LOOKUP_MAX_ATTEMPTS = 12;
+const STREAMING_PLAYBACK_MESSAGE_LOOKUP_BACKOFF_STEP = 120;
 
 function getSpeechString(speech, ...keys) {
   if (!speech || typeof speech !== "object") {
@@ -137,6 +209,18 @@ function isMediaSourceSupported(mime) {
     return false;
   }
   return window.MediaSource.isTypeSupported(candidate);
+}
+
+function logCosyVoiceDebug(...args) {
+  if (typeof console === "undefined") {
+    return;
+  }
+  const logger = typeof console.debug === "function" ? console.debug : console.log;
+  try {
+    logger.call(console, "[CosyVoice]", ...args);
+  } catch {
+    // ignore logging issues
+  }
 }
 
 function isQiniuVoice(option) {
@@ -483,12 +567,73 @@ function normalizeMessage(message) {
   };
 }
 
-function getMessageKey(message) {
-  return (
-    message?.id ??
-    message?.clientId ??
-    `${message?.role ?? "assistant"}-${message?.created_at ?? "unknown"}`
+function normalizeIdentifier(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const normalized = String(value).trim();
+  if (!normalized) {
+    return null;
+  }
+  return normalized;
+}
+
+function collectIdentifiers(...values) {
+  const identifiers = [];
+  for (const value of values) {
+    const normalized = normalizeIdentifier(value);
+    if (!normalized || identifiers.includes(normalized)) {
+      continue;
+    }
+    identifiers.push(normalized);
+  }
+  return identifiers;
+}
+
+function collectMessageIdentifiers(message) {
+  if (!message || typeof message !== "object") {
+    return [];
+  }
+  return collectIdentifiers(
+    message?.id,
+    message?.ID,
+    message?.message_id,
+    message?.messageId,
+    message?.clientId,
+    message?.clientID,
   );
+}
+
+function collectPayloadIdentifiers(payload) {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+  return collectIdentifiers(
+    payload?.id,
+    payload?.ID,
+    payload?.message_id,
+    payload?.messageId,
+    payload?.client_id,
+    payload?.clientId,
+    payload?.uuid,
+    payload?.UUID,
+  );
+}
+
+function getMessageId(message) {
+  const identifiers = collectMessageIdentifiers(message);
+  if (identifiers.length === 0) {
+    return null;
+  }
+  return identifiers[0];
+}
+
+function getMessageKey(message) {
+  const id = getMessageId(message);
+  if (id) {
+    return id;
+  }
+  return `${message?.role ?? "assistant"}-${message?.created_at ?? "unknown"}`;
 }
 
 export default function ChatPanel({
@@ -525,6 +670,8 @@ export default function ChatPanel({
     error: null,
   });
   const [inputValue, setInputValue] = useState("");
+  const markdownRemarkPlugins = useMemo(() => [remarkGfm, remarkMath], []);
+  const markdownRehypePlugins = useMemo(() => [rehypeKatex], []);
   const patchMessageSpeechExtras = useCallback(
     (messageId, mutate) => {
       if (messageId === null || messageId === undefined) {
@@ -646,9 +793,6 @@ export default function ChatPanel({
     );
   }, [messages]);
   useEffect(() => {
-    speechPreparingRef.current = speechPreparing;
-  }, [speechPreparing]);
-  useEffect(() => {
     setCurrentRatingSummary(normalizeRatingSummary(ratingSummary));
   }, [ratingSummary]);
   useEffect(() => {
@@ -717,7 +861,63 @@ export default function ChatPanel({
   const currentSpeechRef = useRef(null);
   const playedSpeechIdsRef = useRef(new Set());
   const speechAutoPlayRef = useRef(true);
-  const speechPreparingRef = useRef(false);
+  const streamingSessionsRef = useRef(new Map());
+  const sendingLocksRef = useRef(new Set());
+
+  const acquireSendLock = useCallback(() => {
+    const lock = Symbol("sendLock");
+    sendingLocksRef.current.add(lock);
+    setIsSending(true);
+    return lock;
+  }, [setIsSending]);
+
+  const releaseSendLock = useCallback((lock) => {
+    if (sendingLocksRef.current.delete(lock)) {
+      setIsSending(sendingLocksRef.current.size > 0);
+    }
+  }, [setIsSending]);
+
+  const getStreamingKey = (messageId) => {
+    if (messageId === null || messageId === undefined) {
+      return null;
+    }
+    return String(messageId);
+  };
+
+  const getStreamingSession = (messageId) => {
+    const key = getStreamingKey(messageId);
+    if (!key) {
+      return null;
+    }
+    return streamingSessionsRef.current.get(key) ?? null;
+  };
+
+  const setStreamingSession = (messageId, session) => {
+    const key = getStreamingKey(messageId);
+    if (!key) {
+      return;
+    }
+    const existing = streamingSessionsRef.current.get(key);
+    if (existing && existing !== session) {
+      try {
+        existing.destroy();
+        logCosyVoiceDebug("destroyed previous streaming session", { messageId: key });
+      } catch (error) {
+        console.warn("Failed to cleanup streaming session", error);
+      }
+    }
+    if (session) {
+      streamingSessionsRef.current.set(key, session);
+      logCosyVoiceDebug("set streaming session", {
+        messageId: key,
+        label: session?.debugLabel ?? null,
+      });
+    } else {
+      streamingSessionsRef.current.delete(key);
+      logCosyVoiceDebug("cleared streaming session", { messageId: key });
+    }
+  };
+
   const messagesRef = useRef([]);
   const speechRefreshTimersRef = useRef(new Map());
   const loadMessagesRef = useRef(() => {});
@@ -1073,15 +1273,25 @@ export default function ChatPanel({
         normalized.suggestedMotion ??
         EMOTION_MOTION_FALLBACKS[normalized.label] ??
         (normalized.label === "neutral" ? "idle_emphatic" : "");
+      const amplifiedIntensity = clamp(
+        (normalized.intensity ?? 0.5) * 1.25 +
+          (normalized.label && normalized.label !== "neutral" ? 0.15 : 0.05),
+        0,
+        1,
+      );
+      const boostedEmotion = {
+        ...normalized,
+        intensity: amplifiedIntensity,
+      };
       try {
-        controls.setEmotion?.(normalized);
+        controls.setEmotion?.(boostedEmotion);
         if (controls.setMouthOpen) {
           const target = clamp(
-            0.3 + (normalized.intensity ?? 0.55) * 0.55,
+            0.36 + (boostedEmotion.intensity ?? 0.6) * 0.6,
             0,
-            0.95,
+            0.97,
           );
-          controls.setMouthOpen(target, 220);
+          controls.setMouthOpen(target, 250);
         }
       } catch (error) {
         console.warn("Live2D setEmotion failed", error);
@@ -1089,7 +1299,7 @@ export default function ChatPanel({
       if (motionKey) {
         try {
           controls.playMotion?.(motionKey, {
-            intensity: clamp((normalized.intensity ?? 0.6) * 1.1, 0.2, 1),
+            intensity: clamp((boostedEmotion.intensity ?? 0.65) * 1.2, 0.3, 1),
           });
         } catch (error) {
           console.warn("Live2D playMotion failed", error);
@@ -1102,13 +1312,16 @@ export default function ChatPanel({
       const duration =
         typeof holdMs === "number" && holdMs >= 0
           ? holdMs
-          : Math.max(1800, Math.floor((normalized.intensity ?? 0.5) * 4800));
+          : Math.max(
+              2000,
+              Math.floor((boostedEmotion.intensity ?? 0.55) * 5200),
+            );
       ambientEmotionTimeoutRef.current = window.setTimeout(() => {
         try {
-          controls.setEmotion?.({ label: "neutral", intensity: 0.32 });
+          controls.setEmotion?.({ label: "neutral", intensity: 0.4 });
           controls.clearEmotion?.();
           if (controls.setMouthOpen) {
-            controls.setMouthOpen(0.18, 200);
+            controls.setMouthOpen(0.22, 240);
           }
         } catch (error) {
           console.warn("Live2D reset emotion failed", error);
@@ -1131,6 +1344,16 @@ export default function ChatPanel({
       } catch (error) {
         console.warn("Failed to pause audio", error);
       }
+    }
+    if (current?.messageId !== null && current?.messageId !== undefined) {
+      setStreamingSession(current.messageId, null);
+    }
+    if (Array.isArray(speechQueueRef.current) && speechQueueRef.current.length > 0) {
+      speechQueueRef.current.forEach((item) => {
+        if (item?.id !== null && item?.id !== undefined) {
+          setStreamingSession(item.id, null);
+        }
+      });
     }
     let cleanupHandled = false;
     if (current?.cleanup) {
@@ -1193,16 +1416,52 @@ export default function ChatPanel({
     if (!next) {
       return;
     }
+    logCosyVoiceDebug("scheduleNextSpeech", {
+      messageId: next.id,
+      queueRemaining: speechQueueRef.current.length,
+    });
     if (typeof window !== "undefined" && ambientEmotionTimeoutRef.current) {
       window.clearTimeout(ambientEmotionTimeoutRef.current);
       ambientEmotionTimeoutRef.current = null;
     }
     const normalizedEmotion = normalizeEmotionMeta(next.emotion);
     const speech = next.speech;
+    const streamingSession = next.streamingSession ?? getStreamingSession(next.id);
+    const streamingRetryCount = Number(next.streamingRetryCount ?? 0);
+    let audio = null;
+    let usedStreamingAudio = false;
+    let primedStreamingAudio = null;
+    let streamingPlayable = false;
+    let streamingPending = false;
+    if (streamingSession && typeof streamingSession.getAudioElement === "function") {
+      try {
+        primedStreamingAudio = streamingSession.getAudioElement();
+      } catch (error) {
+        logCosyVoiceDebug("getAudioElement failed", { messageId: next.id, error });
+      }
+    }
+    if (
+      streamingSession &&
+      typeof streamingSession.isPlayable === "function"
+    ) {
+      try {
+        streamingPlayable = Boolean(streamingSession.isPlayable());
+        streamingPending = !streamingPlayable;
+      } catch (error) {
+        console.warn("streaming session isPlayable check failed", error);
+      }
+    }
+    if (streamingPlayable && primedStreamingAudio) {
+      audio = primedStreamingAudio;
+      usedStreamingAudio = true;
+      logCosyVoiceDebug("using streaming audio element", {
+        messageId: next.id,
+      });
+    }
+
     const base64Source = getSpeechString(speech, "audio_base64", "audioBase64");
     const audioUrl = getSpeechString(speech, "audio_url", "audioUrl");
-    let audio = null;
-    if (audioUrl) {
+    if (!audio && audioUrl && (!streamingPending || streamingRetryCount >= STREAMING_PLAYBACK_MAX_RETRIES)) {
       let resolvedUrl = audioUrl;
       try {
         resolvedUrl = new URL(audioUrl, API_BASE_URL).toString();
@@ -1217,8 +1476,12 @@ export default function ChatPanel({
       element.src = resolvedUrl;
       element.load();
       audio = element;
+      logCosyVoiceDebug("falling back to audio URL", {
+        messageId: next.id,
+        url: resolvedUrl,
+      });
     }
-    if (!audio && base64Source) {
+    if (!audio && base64Source && (!streamingPending || streamingRetryCount >= STREAMING_PLAYBACK_MAX_RETRIES)) {
       const mime =
         getSpeechString(speech, "mime_type", "mimeType", "mime") ||
         "audio/mpeg";
@@ -1228,13 +1491,62 @@ export default function ChatPanel({
       element.src = `data:${mime};base64,${base64Source}`;
       element.load();
       audio = element;
+      logCosyVoiceDebug("falling back to base64 audio", {
+        messageId: next.id,
+        mime,
+      });
     }
     if (!audio) {
+      if (streamingPending && typeof window !== "undefined") {
+        if (streamingRetryCount < STREAMING_PLAYBACK_MAX_RETRIES) {
+          const backoff = Math.min(
+            STREAMING_PLAYBACK_RETRY_BASE_DELAY + streamingRetryCount * 120,
+            STREAMING_PLAYBACK_MAX_DELAY,
+          );
+          speechQueueRef.current.unshift({
+            ...next,
+            streamingSession,
+            streamingRetryCount: streamingRetryCount + 1,
+          });
+          logCosyVoiceDebug("streaming audio not ready yet, retrying", {
+            messageId: next.id,
+            retry: streamingRetryCount + 1,
+            delay: backoff,
+          });
+          window.setTimeout(() => {
+            if (!currentSpeechRef.current) {
+              scheduleNextSpeech();
+            }
+          }, backoff);
+          return;
+        }
+        logCosyVoiceDebug("streaming playback fallback after retries", {
+          messageId: next.id,
+          retries: streamingRetryCount,
+        });
+      }
+      logCosyVoiceDebug("no audio source available for message", {
+        messageId: next.id,
+      });
       scheduleNextSpeech();
       return;
     }
+    const sourceDescriptor = usedStreamingAudio
+      ? "streaming"
+      : audioUrl
+        ? "url"
+        : base64Source
+          ? "base64"
+          : "unknown";
+    logCosyVoiceDebug("prepared audio source", {
+      messageId: next.id,
+      source: sourceDescriptor,
+      streamingSession: Boolean(streamingSession),
+    });
     const fallbackMime =
-      getSpeechString(speech, "mime_type", "mimeType", "mime") || "audio/mpeg";
+      getSpeechString(speech, "audio_type", "audioType", "mime") ||
+      getSpeechString(speech, "mime_type", "mimeType", "mime") ||
+      "audio/mpeg";
     const fallbackSrc = base64Source
       ? `data:${fallbackMime};base64,${base64Source}`
       : null;
@@ -1265,27 +1577,37 @@ export default function ChatPanel({
       } else if (controls?.clearEmotion) {
         controls.clearEmotion();
       }
+      if (streamingSession) {
+        setStreamingSession(next.id, null);
+      }
       currentSpeechRef.current = null;
       setActiveSpeechId(null);
       lastEmotionPreviewIdRef.current = null;
+      logCosyVoiceDebug("playback cleanup complete", { messageId: next.id });
     };
     const finishPlayback = () => {
       cleanup();
       scheduleNextSpeech();
     };
     const handlePlay = () => {
+      logCosyVoiceDebug("audio started", {
+        messageId: next.id,
+        source: sourceDescriptor,
+      });
       const ctx = ensureAudioContext();
       if (!ctx) {
-        const intervalId = window.setInterval(() => {
-          if (audio.paused) {
-            return;
-          }
-          const simulated = 0.35 + Math.random() * 0.4;
-          if (controls?.setMouthOpen) {
-            controls.setMouthOpen(clamp(simulated, 0, 1), 150);
-          }
-        }, 120);
-        cleanupFns.push(() => window.clearInterval(intervalId));
+        if (typeof window !== "undefined") {
+          const intervalId = window.setInterval(() => {
+            if (audio.paused) {
+              return;
+            }
+            const simulated = 0.35 + Math.random() * 0.4;
+            if (controls?.setMouthOpen) {
+              controls.setMouthOpen(clamp(simulated, 0, 1), 150);
+            }
+          }, 120);
+          cleanupFns.push(() => window.clearInterval(intervalId));
+        }
         return;
       }
       let sourceNode = null;
@@ -1352,6 +1674,7 @@ export default function ChatPanel({
       });
     };
     const handleError = (event) => {
+      logCosyVoiceDebug("audio error", { messageId: next.id, source: sourceDescriptor, event });
       if (fallbackSrc && audio.src !== fallbackSrc) {
         try {
           audio.pause();
@@ -1380,6 +1703,7 @@ export default function ChatPanel({
       finishPlayback();
     };
     const handleEnded = () => {
+      logCosyVoiceDebug("audio ended", { messageId: next.id, source: sourceDescriptor });
       finishPlayback();
     };
     audio.addEventListener("play", handlePlay);
@@ -1395,7 +1719,11 @@ export default function ChatPanel({
       cleanup,
       messageId: next.id,
       emotion: normalizedEmotion,
+      streamingSession,
     };
+    if (!playedSpeechIdsRef.current.has(next.id)) {
+      playedSpeechIdsRef.current.add(next.id);
+    }
     setActiveSpeechId(next.id);
     setSpeechError(null);
     lastEmotionPreviewIdRef.current = next.id;
@@ -1409,7 +1737,7 @@ export default function ChatPanel({
       playPromise.catch((error) => {
         console.warn("Autoplay failed", error);
         playedSpeechIdsRef.current.delete(next.id);
-        setSpeechError("浏览器阻止了自动播放，请在消息中点击“播放语音”重试。");
+        setSpeechError("Speech playback was blocked by the browser; click the play button in the message to try again.");
         finishPlayback();
       });
     }
@@ -1428,21 +1756,40 @@ export default function ChatPanel({
       const extras = message.extrasParsed;
       const speech = extras?.speech;
       const emotion = normalizeEmotionMeta(extras?.emotion);
-      if (!hasSpeechAudioSource(speech)) {
+      const id = getMessageId(message);
+      if (!id) {
         return;
       }
-      const rawId =
-        message.id ??
-        message.ID ??
-        message.clientId ??
-        message.clientID ??
-        null;
-      if (rawId === null || rawId === undefined) {
+      const streamingSession = getStreamingSession(id);
+      const hasStaticSource = hasSpeechAudioSource(speech);
+      const hasStreamingSession = Boolean(streamingSession);
+      const streamingPlayable =
+        streamingSession &&
+        typeof streamingSession.isPlayable === "function" &&
+        streamingSession.isPlayable();
+      logCosyVoiceDebug("registerSpeech", {
+        messageId: id,
+        hasStaticSource,
+        hasStreamingSession,
+        streamingPlayable,
+        force,
+        interrupt,
+        enqueue,
+      });
+      if (!hasStaticSource && !hasStreamingSession && !streamingPlayable) {
+        logCosyVoiceDebug("registerSpeech skipped: no audio source", { messageId: id });
         return;
       }
-      const id = String(rawId);
       const alreadyPlayed = playedSpeechIdsRef.current.has(id);
-      if (!force && alreadyPlayed) {
+      const isCurrent = currentSpeechRef.current?.messageId === id;
+      const isQueued = speechQueueRef.current.some((item) => item.id === id);
+      if (!force && (alreadyPlayed || isCurrent || isQueued)) {
+        logCosyVoiceDebug("registerSpeech skipped: already handled", {
+          messageId: id,
+          alreadyPlayed,
+          isCurrent,
+          isQueued,
+        });
         return;
       }
       if (interrupt) {
@@ -1467,8 +1814,10 @@ export default function ChatPanel({
           currentSpeechRef.current = null;
           setActiveSpeechId(null);
         }
+        logCosyVoiceDebug("registerSpeech interrupted active playback", { messageId: id });
       }
       if (!force && !speechAutoPlayRef.current) {
+        logCosyVoiceDebug("registerSpeech deferred due to auto-play disabled", { messageId: id });
         if (markPlayed && !alreadyPlayed) {
           playedSpeechIdsRef.current.add(id);
         }
@@ -1489,17 +1838,27 @@ export default function ChatPanel({
         playedSpeechIdsRef.current.add(id);
       }
       if (!enqueue) {
+        logCosyVoiceDebug("registerSpeech skipped: enqueue disabled", { messageId: id });
         return;
       }
       speechQueueRef.current.push({
         id,
         speech,
         emotion,
+        streamingSession,
+        streamingRetryCount: Number(message?.streamingRetryCount ?? 0),
+      });
+      logCosyVoiceDebug("enqueued speech playback", {
+        messageId: id,
+        queueSize: speechQueueRef.current.length,
+        streamingSession: Boolean(streamingSession),
       });
       scheduleNextSpeech();
     },
     [applyEmotionToAvatar, scheduleNextSpeech],
   );
+
+
   useEffect(
     () => () => {
       stopSpeechPlayback();
@@ -1510,6 +1869,20 @@ export default function ChatPanel({
     },
     [stopSpeechPlayback],
   );
+  useEffect(() => {
+    return () => {
+      streamingSessionsRef.current.forEach((session) => {
+        if (session && typeof session.destroy === "function") {
+          try {
+            session.destroy();
+          } catch (error) {
+            console.warn("Failed to destroy streaming session", error);
+          }
+        }
+      });
+      streamingSessionsRef.current.clear();
+    };
+  }, []);
   useEffect(() => {
     speechAutoPlayRef.current = speechAutoPlay;
     if (!speechAutoPlay) {
@@ -2345,10 +2718,13 @@ export default function ChatPanel({
         window.clearTimeout(speechRefreshTimersRef.current.get(key));
       }
       const delay = Math.min(6000, 1000 * (attempt + 1));
+      logCosyVoiceDebug("scheduleSpeechRefresh timer", { messageId, attempt, delay });
       const timerId = window.setTimeout(async () => {
         speechRefreshTimersRef.current.delete(key);
+        logCosyVoiceDebug("scheduleSpeechRefresh tick", { messageId, attempt });
         const statusResponse = await fetchSpeechStatus(messageId);
         if (!statusResponse) {
+          logCosyVoiceDebug("scheduleSpeechRefresh retry: empty response", { messageId, attempt });
           scheduleSpeechRefresh(messageId, attempt + 1);
           return;
         }
@@ -2362,6 +2738,11 @@ export default function ChatPanel({
         const speechPayload = statusResponse.speech ?? null;
         const speechErrorMessage =
           statusResponse.speech_error ?? statusResponse.speechError ?? "";
+        logCosyVoiceDebug("scheduleSpeechRefresh status", {
+          messageId,
+          status,
+          hasSpeech: Boolean(speechPayload),
+        });
         let target = messagesRef.current.find(
           (item) => String(item?.id ?? item?.ID ?? "") === key,
         );
@@ -2370,6 +2751,9 @@ export default function ChatPanel({
           target = messagesRef.current.find(
             (item) => String(item?.id ?? item?.ID ?? "") === key,
           );
+          if (!target) {
+            logCosyVoiceDebug("scheduleSpeechRefresh target still missing", { messageId });
+          }
         }
         if (target) {
           const mergedExtras = { ...(target.extrasParsed ?? {}) };
@@ -2393,19 +2777,36 @@ export default function ChatPanel({
           target = updatedTarget;
         }
         if (speechPayload && hasSpeechAudioSource(speechPayload) && target) {
-          registerSpeech(target, {
-            enqueue: true,
-            force: true,
-            markPlayed: false,
-            interrupt: true,
-          });
+          const playbackKey =
+            target?.id ?? target?.ID ?? target?.clientId ?? target?.clientID ?? null;
+          if (playbackKey === null || playbackKey === undefined) {
+            logCosyVoiceDebug("scheduleSpeechRefresh enqueueing speech", { messageId });
+            registerSpeech(target, {
+              enqueue: true,
+              force: true,
+              markPlayed: false,
+              interrupt: true,
+            });
+          } else if (!playedSpeechIdsRef.current.has(String(playbackKey))) {
+            logCosyVoiceDebug("scheduleSpeechRefresh enqueueing speech", { messageId });
+            registerSpeech(target, {
+              enqueue: true,
+              force: true,
+              markPlayed: false,
+              interrupt: true,
+            });
+          } else {
+            logCosyVoiceDebug("scheduleSpeechRefresh skipped: already played", { messageId });
+          }
           return;
         }
         if (status === "pending" || status === "streaming") {
+          logCosyVoiceDebug("scheduleSpeechRefresh retrying", { messageId, status, attempt });
           scheduleSpeechRefresh(messageId, attempt + 1);
           return;
         }
         if (status === "error" && speechErrorMessage) {
+          logCosyVoiceDebug("scheduleSpeechRefresh error status", { messageId, status });
           setSpeechError(speechErrorMessage);
         }
       }, delay);
@@ -2557,6 +2958,8 @@ export default function ChatPanel({
     initializeConversation,
     handleUnauthorizedResponse,
     stopSpeechPlayback,
+    acquireSendLock,
+    releaseSendLock,
   ]);
   useEffect(() => {
     (async () => {
@@ -2601,12 +3004,14 @@ export default function ChatPanel({
         setSendError(errorMessage);
         return { success: false, trimmed, error: errorMessage };
       }
-      if (speechPreparingRef.current) {
-        const errorMessage = "语音加载中，请稍候再发送下一条消息。";
-        setSendError(errorMessage);
-        return { success: false, trimmed, error: errorMessage };
-      }
-      setIsSending(true);
+      const lockId = acquireSendLock();
+      let unlocked = false;
+      const unlockSending = () => {
+        if (!unlocked) {
+          unlocked = true;
+          releaseSendLock(lockId);
+        }
+      };
       setSendError(null);
       const optimisticMessage = {
         id: `temp-${Date.now()}`,
@@ -2712,11 +3117,14 @@ export default function ChatPanel({
           lastAssistant = normalized;
           setMessages((prev) => {
             let replaced = false;
+            const normalizedKeys = collectMessageIdentifiers(normalized);
+            const normalizedKeySet = new Set(normalizedKeys);
             const updated = prev.map((item) => {
-              if (
-                String(item?.id ?? item?.ID ?? item?.clientId ?? "") ===
-                String(normalized.id ?? normalized.ID ?? "")
-              ) {
+              const itemKeys = collectMessageIdentifiers(item);
+              const matches =
+                normalizedKeySet.size > 0 &&
+                itemKeys.some((key) => normalizedKeySet.has(key));
+              if (matches) {
                 replaced = true;
                 return normalized;
               }
@@ -2734,13 +3142,24 @@ export default function ChatPanel({
             handleAssistantFinal(normalized);
           }
         };
-        const applyAssistantDelta = (messageId, content) => {
-          if (!messageId) {
+        const applyAssistantDelta = (identifierCandidates, content) => {
+          const keys = Array.isArray(identifierCandidates)
+            ? Array.from(
+                new Set(
+                  identifierCandidates
+                    .map((value) => normalizeIdentifier(value))
+                    .filter(Boolean),
+                ),
+              )
+            : [];
+          if (keys.length === 0) {
             return;
           }
+          const keySet = new Set(keys);
           setMessages((prev) =>
             prev.map((item) => {
-              if (String(item?.id ?? item?.ID ?? "") === String(messageId)) {
+              const itemKeys = collectMessageIdentifiers(item);
+              if (itemKeys.some((key) => keySet.has(key))) {
                 return { ...item, content };
               }
               return item;
@@ -2790,16 +3209,18 @@ export default function ChatPanel({
               break;
             }
             case "assistant_delta": {
-              const targetId = payload?.id ?? payload?.ID ?? null;
+              const identifiers = collectPayloadIdentifiers(payload);
               const full =
                 typeof payload?.full === "string" ? payload.full : "";
-              if (targetId && full) {
-                applyAssistantDelta(targetId, full);
+              if (identifiers.length > 0 && full) {
+                applyAssistantDelta(identifiers, full);
+                unlockSending();
               }
               break;
             }
             case "assistant_message": {
               upsertAssistantMessage(payload, { markFinal: true });
+              unlockSending();
               break;
             }
             case "token_update": {
@@ -2830,16 +3251,164 @@ export default function ChatPanel({
             }
             case "speech_stream_started": {
               const messageId = payload?.id ?? payload?.ID ?? null;
+              const format =
+                (typeof payload?.format === "string" && payload.format.trim()) ||
+                (typeof payload?.Format === "string" && payload.Format.trim()) ||
+                "";
+              const mimeType =
+                (typeof payload?.mime_type === "string" && payload.mime_type.trim()) ||
+                (typeof payload?.mimeType === "string" && payload.mimeType.trim()) ||
+                "";
               if (messageId !== null && messageId !== undefined) {
+                logCosyVoiceDebug("speech_stream_started", {
+                  messageId,
+                  format,
+                  mimeType,
+                });
                 patchMessageSpeechExtras(messageId, (extras) => {
                   extras.speech_status = "streaming";
+                  const speechExtras = { ...(extras.speech ?? {}) };
+                  delete speechExtras.audio_base64;
+                  delete speechExtras.audioBase64;
+                  delete speechExtras.audio_url;
+                  delete speechExtras.audioUrl;
+                  if (payload?.voice_id) {
+                    speechExtras.voice_id = payload.voice_id;
+                  }
+                  if (payload?.provider) {
+                    speechExtras.provider = payload.provider;
+                  }
+                  if (format) {
+                    speechExtras.format = format;
+                  }
+                  if (mimeType) {
+                    speechExtras.mime_type = mimeType;
+                    speechExtras.mimeType = mimeType;
+                  }
+                  if (payload?.sample_rate) {
+                    speechExtras.sample_rate = payload.sample_rate;
+                  }
+                  speechExtras.streaming = true;
+                  extras.speech = speechExtras;
+                  if (extras.speech_error) {
+                    delete extras.speech_error;
+                  }
+                });
+                let streamingPlaybackAttempt = 0;
+                let sessionInstance = null;
+                const queueStreamingPlayback = () => {
+                  if (!sessionInstance || sessionInstance.destroyed) {
+                    return;
+                  }
+                  const currentMessage = messagesRef.current.find(
+                    (item) =>
+                      String(item?.id ?? item?.ID ?? item?.clientId ?? "") ===
+                      String(messageId),
+                  );
+                  if (currentMessage) {
+                    streamingPlaybackAttempt = 0;
+                    logCosyVoiceDebug("queueStreamingPlayback", { messageId });
+                    registerSpeech(currentMessage, {
+                      enqueue: true,
+                      force: true,
+                      markPlayed: false,
+                      interrupt: true,
+                    });
+                    return;
+                  }
+                  if (typeof window === "undefined") {
+                    return;
+                  }
+                  if (streamingPlaybackAttempt >= STREAMING_PLAYBACK_MESSAGE_LOOKUP_MAX_ATTEMPTS) {
+                    logCosyVoiceDebug("queueStreamingPlayback abandoned", {
+                      messageId,
+                      attempts: streamingPlaybackAttempt,
+                    });
+                    return;
+                  }
+                  streamingPlaybackAttempt += 1;
+                  const delay = Math.min(
+                    STREAMING_PLAYBACK_RETRY_BASE_DELAY +
+                      streamingPlaybackAttempt * STREAMING_PLAYBACK_MESSAGE_LOOKUP_BACKOFF_STEP,
+                    STREAMING_PLAYBACK_MAX_DELAY,
+                  );
+                  logCosyVoiceDebug("queueStreamingPlayback waiting", {
+                    messageId,
+                    attempt: streamingPlaybackAttempt,
+                    delay,
+                  });
+                  window.setTimeout(() => {
+                    const activeSession = getStreamingSession(messageId);
+                    if (activeSession === sessionInstance && !sessionInstance.destroyed) {
+                      queueStreamingPlayback();
+                    }
+                  }, delay);
+                };
+                sessionInstance = new StreamingAudioSession({
+                  mimeType,
+                  onFirstPlayable: queueStreamingPlayback,
+                  onError: (error) => {
+                    console.warn("Streaming audio session error", error);
+                  },
+                  debug: true,
+                  debugLabel: messageId,
+                });
+                setStreamingSession(messageId, sessionInstance);
+                logCosyVoiceDebug("streaming session created", { messageId, mimeType, format });
+                queueStreamingPlayback();
+              }
+              break;
+            }
+            case "speech_stream_chunk": {
+              const messageId = payload?.id ?? payload?.ID ?? null;
+              if (messageId === null || messageId === undefined) {
+                break;
+              }
+              const session = getStreamingSession(messageId);
+              if (!session) {
+                logCosyVoiceDebug("speech_stream_chunk skipped: session missing", { messageId });
+                break;
+              }
+              const base64Chunk =
+                (typeof payload?.audio_base64 === "string" && payload.audio_base64.trim()) ||
+                (typeof payload?.audioBase64 === "string" && payload.audioBase64.trim()) ||
+                "";
+              if (!base64Chunk) {
+                break;
+              }
+              const decoded = decodeBase64ToUint8(base64Chunk);
+              if (!decoded) {
+                break;
+              }
+              const sequenceValue = payload?.sequence ?? payload?.Sequence ?? null;
+              let sequenceNumber = -1;
+              if (typeof sequenceValue === "number" && Number.isFinite(sequenceValue)) {
+                sequenceNumber = sequenceValue;
+              } else if (typeof sequenceValue === "string") {
+                const parsed = Number(sequenceValue);
+                if (Number.isFinite(parsed)) {
+                  sequenceNumber = parsed;
+                }
+              }
+              if (sequenceNumber <= 1 || sequenceNumber === -1) {
+                logCosyVoiceDebug("speech_stream_chunk received", {
+                  messageId,
+                  sequence: sequenceNumber,
+                  size: decoded.length,
                 });
               }
+              session.appendChunk(decoded, sequenceNumber);
               break;
             }
             case "speech_stream_completed": {
               const messageId = payload?.id ?? payload?.ID ?? null;
               if (messageId !== null && messageId !== undefined) {
+                logCosyVoiceDebug("speech_stream_completed", { messageId });
+                const session = getStreamingSession(messageId);
+                if (session && typeof session.finalize === "function") {
+                  logCosyVoiceDebug("finalizing streaming session", { messageId });
+                  session.finalize();
+                }
                 const audioBase64 =
                   (typeof payload?.audio_base64 === "string" &&
                     payload.audio_base64.trim()) ||
@@ -2876,6 +3445,9 @@ export default function ChatPanel({
                 }
                 patchMessageSpeechExtras(messageId, (extras) => {
                   const speech = { ...(extras.speech ?? {}), ...speechPayload };
+                  if (speech.streaming) {
+                    delete speech.streaming;
+                  }
                   extras.speech = speech;
                   extras.speech_status = "ready";
                   if (payload?.error) {
@@ -2898,22 +3470,34 @@ export default function ChatPanel({
                     },
                     speech_status: "ready",
                   };
+                  if (mergedExtras.speech?.streaming) {
+                    delete mergedExtras.speech.streaming;
+                  }
                   if (payload?.error) {
                     mergedExtras.speech_error = payload.error;
                   } else if (mergedExtras.speech_error) {
                     delete mergedExtras.speech_error;
                   }
+                  logCosyVoiceDebug("registering final speech payload", { messageId });
                   registerSpeech(
                     { ...currentMessage, extrasParsed: mergedExtras },
                     { enqueue: true, interrupt: false },
                   );
+                } else {
+                  logCosyVoiceDebug("speech_stream_completed message missing", { messageId });
                 }
               }
               break;
             }
+
             case "speech_stream_failed": {
               const messageId = payload?.id ?? payload?.ID ?? null;
               if (messageId !== null && messageId !== undefined) {
+                logCosyVoiceDebug("speech_stream_failed", {
+                  messageId,
+                  error: payload?.error ?? null,
+                });
+                setStreamingSession(messageId, null);
                 patchMessageSpeechExtras(messageId, (extras) => {
                   extras.speech_status = "error";
                   const errorMessage =
@@ -2923,10 +3507,16 @@ export default function ChatPanel({
                   if (errorMessage) {
                     extras.speech_error = errorMessage;
                   }
+                  if (extras.speech?.streaming) {
+                    const speech = { ...(extras.speech ?? {}) };
+                    delete speech.streaming;
+                    extras.speech = speech;
+                  }
                 });
               }
               break;
             }
+
             case "error": {
               const message =
                 typeof payload?.error === "string" && payload.error
@@ -3008,6 +3598,7 @@ export default function ChatPanel({
           } finally {
             reader.releaseLock();
           }
+          unlockSending();
           cleanOptimistic();
           return { success: true, trimmed, assistant: lastAssistant };
         }
@@ -3073,6 +3664,7 @@ export default function ChatPanel({
         if (data?.assistant_error) {
           setSendError(data.assistant_error);
         }
+        unlockSending();
         return {
           success: true,
           trimmed,
@@ -3085,7 +3677,7 @@ export default function ChatPanel({
         cleanOptimistic();
         return { success: false, trimmed, error: message };
       } finally {
-        setIsSending(false);
+        unlockSending();
       }
     },
     [
@@ -3173,10 +3765,6 @@ export default function ChatPanel({
         return;
       }
       const trimmed = typeof transcript === "string" ? transcript.trim() : "";
-      if (speechPreparingRef.current) {
-        setPhoneCallError("语音加载中，请稍候再说话。");
-        return;
-      }
       setLastHeardText(trimmed);
       const result = await sendChatMessage(trimmed);
       if (!result.success) {
@@ -3578,10 +4166,11 @@ export default function ChatPanel({
                 const bubbleClasses = isUser
                   ? "bg-blue-500 text-white"
                   : "bg-gray-100 text-gray-900";
+                const messageId = getMessageId(message);
                 const isSpeaking =
                   activeSpeechId != null &&
-                  message?.id != null &&
-                  activeSpeechId === message.id;
+                  messageId != null &&
+                  activeSpeechId === messageId;
                 const messageExtras = message?.extrasParsed ?? {};
                 const speech = messageExtras?.speech;
                 const emotionMeta = normalizeEmotionMeta(
@@ -3604,9 +4193,10 @@ export default function ChatPanel({
                   (normalizedSpeechStatus === "pending" ||
                     normalizedSpeechStatus === "streaming");
                 const baseContent = message?.content ?? "";
-                const displayContent = shouldDelayAssistantContent
-                  ? "加载中..."
-                  : baseContent;
+                const displayContent =
+                  shouldDelayAssistantContent && !baseContent?.length
+                    ? "请稍后..."
+                    : baseContent;
                 return (
                   <li
                     key={getMessageKey(message)}
@@ -3629,9 +4219,15 @@ export default function ChatPanel({
                       <div className="flex max-w-[80%] items-start gap-3">
                         <div className="flex max-w-full flex-col items-end">
                           <div
-                            className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
+                            className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
                           >
-                            {displayContent}
+                            <ReactMarkdown
+                              remarkPlugins={markdownRemarkPlugins}
+                              rehypePlugins={markdownRehypePlugins}
+                              components={MARKDOWN_COMPONENTS}
+                            >
+                              {displayContent || ""}
+                            </ReactMarkdown>
                           </div>
                           <span className="mt-1 text-xs text-right text-gray-400">
                             {userDisplayName}
@@ -3661,9 +4257,15 @@ export default function ChatPanel({
                     ) : (
                       <div className="flex max-w-[80%] flex-col items-start">
                         <div
-                          className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
+                          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
                         >
-                          {displayContent}
+                          <ReactMarkdown
+                            remarkPlugins={markdownRemarkPlugins}
+                            rehypePlugins={markdownRehypePlugins}
+                            components={MARKDOWN_COMPONENTS}
+                          >
+                            {displayContent || ""}
+                          </ReactMarkdown>
                         </div>
                         <span className="mt-1 text-xs text-left text-gray-400">
                           {agent?.name ?? role}
@@ -3684,7 +4286,7 @@ export default function ChatPanel({
                             </button>
                             <button
                               onClick={stopSpeechPlayback}
-                              disabled={activeSpeechId !== message?.id}
+                              disabled={messageId == null || activeSpeechId !== messageId}
                               className="flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-[11px] text-gray-600 transition hover-border-red-400 hover:text-red-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
                               type="button"
                             >
@@ -3732,8 +4334,7 @@ export default function ChatPanel({
                   disabled={
                     !voiceSupported ||
                     !phoneCallActive ||
-                    isSending ||
-                    speechPreparing
+                    isSending
                   }
                   className="flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
                 >
@@ -3761,7 +4362,7 @@ export default function ChatPanel({
               </div>
               {speechPreparing ? (
                 <p className="text-xs text-amber-600">
-                  语音生成中，请稍候再发送消息。
+                  语音生成中，可以继续输入消息。
                 </p>
               ) : null}
               <div className="rounded-2xl border border-gray-200 bg-white/70 px-4 py-3 text-xs text-gray-500">
@@ -3791,12 +4392,10 @@ export default function ChatPanel({
                 placeholder={
                   !userId
                     ? "Loading user context..."
-                    : speechPreparing
-                      ? "等待语音加载完成..."
-                      : "Type a question or use voice input"
+                    : "Type a question or use voice input"
                 }
                 disabled={
-                  !userId || isSending || speechPreparing || insufficientTokens
+                  !userId || isSending || insufficientTokens
                 }
                 rows={3}
                 className="w-full resize-none rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-gray-100"
@@ -3812,7 +4411,7 @@ export default function ChatPanel({
               ) : null}
               {speechPreparing ? (
                 <p className="text-xs text-amber-600">
-                  语音生成中，请稍候再发送消息。
+                  语音生成中，可以继续输入消息。
                 </p>
               ) : null}
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -3823,7 +4422,6 @@ export default function ChatPanel({
                       !voiceSupported ||
                       !userId ||
                       isSending ||
-                      speechPreparing ||
                       insufficientTokens
                     }
                     className="flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -3863,7 +4461,6 @@ export default function ChatPanel({
                       isSending ||
                       !inputValue.trim() ||
                       !userId ||
-                      speechPreparing ||
                       insufficientTokens
                     }
                     className="rounded-full bg-blue-500 px-5 py-2 text-sm font-medium text-white shadow transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-blue-300"
@@ -4132,3 +4729,16 @@ export default function ChatPanel({
     </section>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
