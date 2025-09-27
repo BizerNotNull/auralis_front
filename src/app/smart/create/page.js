@@ -36,6 +36,8 @@ const DEFAULT_LIVE2D_MODEL = {
   storage_type: "local",
 };
 
+const VOICE_PREVIEW_SAMPLE = "你好,欢迎来到Auralis";
+
 const INITIAL_FORM_VALUES = {
   name: "",
   one_sentence_intro: "",
@@ -47,10 +49,59 @@ const INITIAL_FORM_VALUES = {
   temperature: "0.3",
   max_tokens: "1024",
   live2d_model_id: "",
+  voice_id: "",
+  voice_provider: "",
   avatar_url: "",
   status: "",
 };
 
+
+
+function findDefaultVoiceForProvider(providerId, voiceProviders, voiceOptions) {
+  const normalized = String(providerId ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+
+  let preferredVoiceId = "";
+  if (Array.isArray(voiceProviders)) {
+    const providerEntry = voiceProviders.find((item) => {
+      const idValue = String(item?.id ?? item?.ID ?? "").trim();
+      return idValue && idValue.toLowerCase() === normalized;
+    });
+    preferredVoiceId = providerEntry
+      ? String(providerEntry?.default_voice ?? providerEntry?.defaultVoice ?? "").trim()
+      : "";
+  }
+
+  if (preferredVoiceId && Array.isArray(voiceOptions)) {
+    const exists = voiceOptions.some(
+      (option) =>
+        String(option?.id ?? "")
+          .trim()
+          .toLowerCase() === preferredVoiceId.toLowerCase(),
+    );
+    if (exists) {
+      return preferredVoiceId;
+    }
+  }
+
+  if (Array.isArray(voiceOptions)) {
+    const match = voiceOptions.find((option) => {
+      const providerValue = String(
+        option?.provider ?? option?.Provider ?? "",
+      )
+        .trim()
+        .toLowerCase();
+      return providerValue === normalized;
+    });
+    if (match && match.id != null) {
+      return String(match.id).trim();
+    }
+  }
+
+  return "";
+}
 function normalizeLive2DModels(list) {
   if (!Array.isArray(list)) {
     return [];
@@ -186,10 +237,47 @@ export default function CreateAgentPage() {
   });
 
   const live2DRef = useRef(null);
+  const voicePreviewAudioRef = useRef(null);
 
   const [live2DStatus, setLive2DStatus] = useState("init");
 
   const [live2DError, setLive2DError] = useState(null);
+  const [voiceStatus, setVoiceStatus] = useState({
+    loading: false,
+    error: null,
+    enabled: false,
+    defaultVoice: "",
+  });
+  const [voiceOptions, setVoiceOptions] = useState([]);
+  const [voiceProviders, setVoiceProviders] = useState([]);
+  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState("");
+  const [voicePreviewStatus, setVoicePreviewStatus] = useState({
+    loading: false,
+    voiceId: "",
+    error: null,
+  });
+  const [voiceSearchTerm, setVoiceSearchTerm] = useState("");
+  const initialVoiceProviderRef = useRef(String(values.voice_provider ?? "").trim());
+
+  const stopVoicePreview = useCallback(() => {
+    const audio = voicePreviewAudioRef.current;
+    if (audio) {
+      try {
+        audio.pause();
+      } catch (previewError) {
+        console.warn("voice preview pause failed", previewError);
+      }
+      try {
+        audio.currentTime = 0;
+      } catch (timeError) {
+        // ignore reset timing errors
+      }
+      audio.onended = null;
+      audio.onerror = null;
+    }
+    voicePreviewAudioRef.current = null;
+    setVoicePreviewStatus({ loading: false, voiceId: "", error: null });
+  }, []);
 
   const avatarPreviewUrl = useMemo(() => {
     if (!avatarFile) {
@@ -317,11 +405,145 @@ export default function CreateAgentPage() {
     };
   }, []);
 
-const populateFormFromAgent = useCallback(
+  useEffect(() => {
+    let cancelled = false;
+
+    setVoiceStatus((prev) => ({ ...prev, loading: true, error: null }));
+
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/tts/voices`, {
+          method: "GET",
+          headers: deriveHeaders(),
+          credentials: "include",
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`�����б�����ʧ�� (${response.status})`);
+        }
+
+        const data = await response.json();
+        const voices = Array.isArray(data?.voices) ? data.voices : [];
+        const providers = Array.isArray(data?.providers) ? data.providers : [];
+
+        setVoiceOptions(voices);
+        setVoiceProviders(providers);
+
+        const defaultProviderFromAPI = String(data?.default_provider ?? "").trim();
+        const normalizedProviders = providers
+          .map((item) => ({
+            id: String(item?.id ?? "").trim(),
+            enabled: Boolean(item?.enabled),
+            defaultVoice: String(
+              item?.default_voice ?? item?.defaultVoice ?? "",
+            ).trim(),
+          }))
+          .filter((item) => item.id);
+
+        const determineDefaultProvider = () => {
+          const existing = String(initialVoiceProviderRef.current ?? "").trim();
+          if (existing) {
+            return existing;
+          }
+          if (defaultProviderFromAPI) {
+            return defaultProviderFromAPI;
+          }
+          const active = normalizedProviders.find((item) => item.enabled);
+          if (active) {
+            return active.id;
+          }
+          if (normalizedProviders.length > 0) {
+            return normalizedProviders[0].id;
+          }
+          if (voices.length > 0) {
+            const providerId = String(
+              voices[0]?.provider ?? voices[0]?.Provider ?? "",
+            ).trim();
+            if (providerId) {
+              return providerId;
+            }
+          }
+          return "";
+        };
+
+        const preferredProvider = determineDefaultProvider();
+        const defaultVoiceForProvider = findDefaultVoiceForProvider(
+          preferredProvider,
+          providers,
+          voices,
+        );
+
+        setVoiceStatus({
+          loading: false,
+          error: null,
+          enabled: voices.length > 0 && Boolean(data?.enabled),
+          defaultVoice: defaultVoiceForProvider,
+        });
+
+        setSelectedVoiceProvider(preferredProvider);
+        setValues((prev) => {
+          const updates = {};
+          let changed = false;
+          if (!String(prev.voice_provider ?? "").trim() && preferredProvider) {
+            updates.voice_provider = preferredProvider;
+            changed = true;
+          }
+          if (!String(prev.voice_id ?? "").trim() && defaultVoiceForProvider) {
+            updates.voice_id = String(defaultVoiceForProvider);
+            changed = true;
+          }
+          return changed ? { ...prev, ...updates } : prev;
+        });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        console.error(error);
+        setVoiceOptions([]);
+        setVoiceProviders([]);
+        setVoiceStatus({
+          loading: false,
+          error: error?.message ?? "�����б�����ʧ��",
+          enabled: false,
+          defaultVoice: "",
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopVoicePreview();
+    };
+  }, [stopVoicePreview]);
+
+  useEffect(() => {
+    const providerValue = String(values.voice_provider ?? "").trim();
+    if (!providerValue) {
+      return;
+    }
+    setSelectedVoiceProvider((prev) =>
+      prev === providerValue ? prev : providerValue,
+    );
+  }, [values.voice_provider]);
+
+
+  const populateFormFromAgent = useCallback(
     (agent, config) => {
       if (!agent) {
         return;
       }
+
+      stopVoicePreview();
 
       let temperature = "";
       let maxTokens = "";
@@ -356,6 +578,9 @@ const populateFormFromAgent = useCallback(
         temperature: temperature || prev.temperature,
         max_tokens: maxTokens || prev.max_tokens,
         live2d_model_id: agent?.live2d_model_id ?? "",
+voice_id: agent?.voice_id ?? agent?.voiceId ?? prev.voice_id ?? "",
+voice_provider:
+  agent?.voice_provider ?? agent?.voiceProvider ?? prev.voice_provider ?? "",
         avatar_url: agent?.avatar_url ?? prev.avatar_url ?? "",
         status: agent?.status ?? prev.status ?? "",
       }));
@@ -363,7 +588,13 @@ const populateFormFromAgent = useCallback(
       setAvatarFile(null);
       setRemoveAvatar(false);
     },
-    [setValues, setInitialAgent, setAvatarFile, setRemoveAvatar],
+    [
+      setValues,
+      setInitialAgent,
+      setAvatarFile,
+      setRemoveAvatar,
+      stopVoicePreview,
+    ],
   );
 
   useEffect(() => {
@@ -382,12 +613,15 @@ const populateFormFromAgent = useCallback(
 
     (async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/agents/${editingAgentId}`, {
-          method: "GET",
-          headers: deriveHeaders(),
-          credentials: "include",
-          cache: "no-store",
-        });
+        const response = await fetch(
+          `${API_BASE_URL}/agents/${editingAgentId}`,
+          {
+            method: "GET",
+            headers: deriveHeaders(),
+            credentials: "include",
+            cache: "no-store",
+          },
+        );
         if (!response.ok) {
           throw new Error(`加载智能体详情失败（${response.status}）`);
         }
@@ -446,12 +680,128 @@ const populateFormFromAgent = useCallback(
     return unique;
   }, [modelList]);
 
-  
   const chatModelOptions = useMemo(
     () => sortChatModels(chatModels),
 
     [chatModels],
   );
+
+  const selectedVoiceOption = useMemo(() => {
+    if (!values.voice_id) {
+      return null;
+    }
+    const target = String(values.voice_id).toLowerCase();
+    return (
+      voiceOptions.find(
+        (item) => String(item?.id ?? "").toLowerCase() === target,
+      ) ?? null
+    );
+  }, [values.voice_id, voiceOptions]);
+
+  const availableVoiceProviders = useMemo(() => {
+    if (voiceProviders.length > 0) {
+      return voiceProviders
+        .map((item) => {
+          const id = String(item?.id ?? "").trim();
+          if (!id) {
+            return null;
+          }
+          const label = String(item?.label ?? item?.id ?? id).trim() || id;
+          return {
+            id,
+            label,
+            enabled: Boolean(item?.enabled),
+          };
+        })
+        .filter(Boolean);
+    }
+
+    const uniqueProviders = new Map();
+    voiceOptions.forEach((option) => {
+      const providerId = String(option?.provider ?? option?.Provider ?? "").trim();
+      if (!providerId || uniqueProviders.has(providerId)) {
+        return;
+      }
+      uniqueProviders.set(providerId, {
+        id: providerId,
+        label: providerId,
+        enabled: true,
+      });
+    });
+    return Array.from(uniqueProviders.values());
+  }, [voiceOptions, voiceProviders]);
+
+  const voiceSearchToken = useMemo(
+    () => voiceSearchTerm.trim().toLowerCase(),
+    [voiceSearchTerm],
+  );
+
+  const filteredVoiceOptions = useMemo(() => {
+    if (!voiceOptions.length) {
+      return [];
+    }
+
+    const normalizedProvider = String(selectedVoiceProvider ?? "").trim().toLowerCase();
+    const baseList = voiceOptions.filter((option) => {
+      if (!normalizedProvider) {
+        return true;
+      }
+      const optionProvider = String(option?.provider ?? option?.Provider ?? "")
+        .trim()
+        .toLowerCase();
+      return optionProvider === normalizedProvider;
+    });
+
+    if (!voiceSearchToken) {
+      return baseList;
+    }
+
+    return baseList.filter((option) => {
+      const parts = [
+        option?.display_name,
+        option?.displayName,
+        option?.name,
+        option?.nickname,
+        option?.language,
+        option?.provider,
+      ]
+        .filter((value) => typeof value === "string")
+        .map((value) => value.toLowerCase());
+      return parts.some((part) => part.includes(voiceSearchToken));
+    });
+  }, [voiceOptions, selectedVoiceProvider, voiceSearchToken]);
+
+  useEffect(() => {
+    if (!selectedVoiceProvider) {
+      return;
+    }
+    const currentVoice = String(values.voice_id ?? "").trim().toLowerCase();
+    const exists = filteredVoiceOptions.some(
+      (option) =>
+        String(option?.id ?? "")
+          .trim()
+          .toLowerCase() === currentVoice,
+    );
+    if (exists) {
+      return;
+    }
+    const fallbackVoice =
+      filteredVoiceOptions.length > 0
+        ? String(filteredVoiceOptions[0]?.id ?? "")
+        : "";
+    if (!fallbackVoice && !currentVoice) {
+      return;
+    }
+    setValues((prev) => {
+      if (fallbackVoice) {
+        return { ...prev, voice_id: fallbackVoice };
+      }
+      if (!prev.voice_id) {
+        return prev;
+      }
+      return { ...prev, voice_id: "" };
+    });
+  }, [filteredVoiceOptions, selectedVoiceProvider, setValues, values.voice_id]);
 
   useEffect(() => {
     if (!chatModelOptions.length) {
@@ -617,11 +967,213 @@ const populateFormFromAgent = useCallback(
     setLive2DError(message ?? null);
   }, []);
 
-  const handleChange = (event) => {
-    const { name, value } = event.target;
+  const handleVoicePreview = useCallback(
+    async (voiceId) => {
+      const target = String(voiceId ?? "").trim();
+      if (!target) {
+        setVoicePreviewStatus({
+          loading: false,
+          voiceId: "",
+          error: "请选择音色后再试听",
+        });
+        return;
+      }
 
-    setValues((prev) => ({ ...prev, [name]: value }));
-  };
+      if (
+        voicePreviewStatus.voiceId === target &&
+        !voicePreviewStatus.loading
+      ) {
+        stopVoicePreview();
+        return;
+      }
+
+      stopVoicePreview();
+      setVoicePreviewStatus({ loading: true, voiceId: target, error: null });
+
+      const option =
+        voiceOptions.find(
+          (item) =>
+            String(item?.id ?? "").toLowerCase() === target.toLowerCase(),
+        ) ?? null;
+
+      const providerForPreview = String(
+        selectedVoiceProvider ||
+          values.voice_provider ||
+          option?.provider ||
+          option?.Provider ||
+          "",
+      ).trim();
+
+      let audioSrc = option?.sample_url ?? option?.sampleUrl ?? "";
+
+      try {
+        if (!audioSrc) {
+          const response = await fetch(`${API_BASE_URL}/tts/preview`, {
+            method: "POST",
+            headers: deriveHeaders({}, { contentType: "application/json" }),
+            credentials: "include",
+            body: JSON.stringify({
+              text: VOICE_PREVIEW_SAMPLE,
+              voice_id: target,
+              provider: providerForPreview,
+            }),
+          });
+          if (!response.ok) {
+            const fallbackMessage = await response.text();
+            throw new Error(fallbackMessage || `试听失败 (${response.status})`);
+          }
+          const data = await response.json();
+          const speech = data?.speech ?? {};
+          const base64 = speech?.audio_base64 ?? "";
+          const mime = speech?.mime_type ?? "audio/mpeg";
+          if (!base64) {
+            throw new Error("试听音频缺失");
+          }
+          audioSrc = `data:${mime};base64,${base64}`;
+        }
+
+        const audio = new Audio(audioSrc);
+        voicePreviewAudioRef.current = audio;
+        audio.onended = () => {
+          voicePreviewAudioRef.current = null;
+          setVoicePreviewStatus({ loading: false, voiceId: "", error: null });
+        };
+        audio.onerror = () => {
+          voicePreviewAudioRef.current = null;
+          setVoicePreviewStatus({
+            loading: false,
+            voiceId: "",
+            error: "音频播放失败",
+          });
+        };
+        let playbackAborted = false;
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.then === "function") {
+          try {
+            await playPromise;
+          } catch (playbackError) {
+            if (playbackError?.name === "AbortError") {
+              playbackAborted = true;
+              console.debug("Voice preview playback interrupted");
+            } else {
+              throw playbackError;
+            }
+          }
+        }
+        if (playbackAborted) {
+          return;
+        }
+        setVoicePreviewStatus({ loading: false, voiceId: target, error: null });
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          console.debug("Voice preview playback cancelled");
+          return;
+        }
+        console.error(error);
+        voicePreviewAudioRef.current = null;
+        setVoicePreviewStatus({
+          loading: false,
+          voiceId: "",
+          error: error?.message ?? "试听失败",
+        });
+      }
+    },
+    [
+      voiceOptions,
+      voicePreviewStatus.loading,
+      voicePreviewStatus.voiceId,
+      stopVoicePreview,
+      selectedVoiceProvider,
+      values.voice_provider,
+    ],
+  );
+
+  const handleVoiceSelect = useCallback(
+    (voiceId) => {
+      const nextVoiceId = String(voiceId ?? "").trim();
+      if (!nextVoiceId) {
+        return;
+      }
+
+      setValues((prev) => {
+        if (prev.voice_id === nextVoiceId) {
+          return prev;
+        }
+        return { ...prev, voice_id: nextVoiceId };
+      });
+      stopVoicePreview();
+    },
+    [setValues, stopVoicePreview],
+  );
+
+  const handleChange = useCallback(
+    (event) => {
+      const { name, value } = event.target;
+
+      setValues((prev) => ({ ...prev, [name]: value }));
+      if (name === "voice_id") {
+        stopVoicePreview();
+      }
+    },
+    [stopVoicePreview, setValues],
+  );
+  const handleVoiceProviderChange = useCallback(
+    (event) => {
+      const rawValue = event?.target?.value ?? "";
+      const nextProvider = String(rawValue).trim();
+
+      stopVoicePreview();
+      setSelectedVoiceProvider(nextProvider);
+      setVoiceSearchTerm("");
+
+      setValues((prev) => {
+        const nextState = { ...prev, voice_provider: nextProvider };
+
+        const normalizedProvider = nextProvider.toLowerCase();
+        const currentVoice = String(prev.voice_id ?? "").trim();
+        let keepCurrent = false;
+        if (currentVoice && normalizedProvider) {
+          const currentOption = voiceOptions.find(
+            (option) =>
+              String(option?.id ?? "")
+                .trim()
+                .toLowerCase() === currentVoice.toLowerCase(),
+          );
+          if (currentOption) {
+            const optionProvider = String(
+              currentOption?.provider ?? currentOption?.Provider ?? "",
+            )
+              .trim()
+              .toLowerCase();
+            keepCurrent = optionProvider === normalizedProvider;
+          }
+        }
+
+        if (!keepCurrent) {
+          const fallbackVoice = findDefaultVoiceForProvider(
+            nextProvider,
+            voiceProviders,
+            voiceOptions,
+          );
+          nextState.voice_id = fallbackVoice || "";
+        }
+
+        return nextState;
+      });
+    },
+    [
+      setValues,
+      setSelectedVoiceProvider,
+      setVoiceSearchTerm,
+      stopVoicePreview,
+      voiceOptions,
+      voiceProviders,
+    ],
+  );
+
+
+
+
 
   const handleAvatarChange = (event) => {
     const file = event.target?.files?.[0];
@@ -695,6 +1247,17 @@ const populateFormFromAgent = useCallback(
 
       if (values.live2d_model_id && values.live2d_model_id.trim()) {
         formData.append("live2d_model_id", values.live2d_model_id.trim());
+      }
+
+      const trimmedVoiceId = (values.voice_id ?? "").trim();
+      if (trimmedVoiceId) {
+        formData.append("voice_id", trimmedVoiceId);
+        const providerValue = (values.voice_provider ?? "").trim();
+        if (providerValue) {
+          formData.append("voice_provider", providerValue);
+        }
+      } else if (voiceStatus.enabled && voiceOptions.length > 0) {
+        throw new Error("请选择音色");
       }
 
       const endpoint = isEditing
@@ -783,7 +1346,7 @@ const populateFormFromAgent = useCallback(
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <span
                   className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClasses(
-                    currentStatus
+                    currentStatus,
                   )}`}
                 >
                   当前状态：{formatStatusLabel(currentStatus)}
@@ -900,18 +1463,18 @@ const populateFormFromAgent = useCallback(
 
                   {avatarFile ? (
                     <button
-                  type="submit"
-                  disabled={submitting || (isEditing && loadingAgent)}
-                  className="rounded-full bg-blue-500 px-5 py-2 text-sm font-medium text-white shadow transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-blue-300"
-                >
-                  {submitting
-                    ? isEditing
-                      ? "保存中..."
-                      : "创建中..."
-                    : isEditing
-                    ? "保存修改"
-                    : "创建智能体"}
-                </button>
+                      type="submit"
+                      disabled={submitting || (isEditing && loadingAgent)}
+                      className="rounded-full bg-blue-500 px-5 py-2 text-sm font-medium text-white shadow transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-blue-300"
+                    >
+                      {submitting
+                        ? isEditing
+                          ? "保存中..."
+                          : "创建中..."
+                        : isEditing
+                          ? "保存修改"
+                          : "创建智能体"}
+                    </button>
                   ) : null}
 
                   {isEditing && (displayAvatarUrl || avatarPreviewUrl) ? (
@@ -927,159 +1490,169 @@ const populateFormFromAgent = useCallback(
               </label>
 
               <section className="space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                   <span className="text-sm font-medium text-slate-600">
-                    选择 Live2D 模型
+                    音色选择
                   </span>
-
-                  {modelListStatus.loading ? (
-                    <span className="text-xs text-slate-400">加载中...</span>
-                  ) : modelListStatus.error ? (
-                    <span className="text-xs text-red-500">
-                      {modelListStatus.error}
-                    </span>
-                  ) : (
-                    <span className="text-xs text-slate-400">
-                      {availableModels.length} 个可用
-                    </span>
-                  )}
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    {voiceStatus.loading ? (
+                      <span className="text-slate-400">音色列表加载中...</span>
+                    ) : null}
+                    {voiceStatus.error ? (
+                      <span className="text-rose-500">{voiceStatus.error}</span>
+                    ) : null}
+                  </div>
                 </div>
 
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                  {availableModels.length ? (
-                    availableModels.map((model) => {
-                      const entry = (model.entry_url ?? "").trim();
-
-                      const active = entry === selectedModelUrl;
-
-                      const cover =
-                        typeof model.preview_url === "string" &&
-                        model.preview_url.trim()
-                          ? resolveAssetUrl(model.preview_url)
-                          : "";
-
-                      const description = model.description ?? "";
-
-                      return (
-                        <button
-                          key={model.id ?? entry}
-                          type="button"
-                          onClick={() => handleModelSelect(entry)}
-                          className={`group relative flex flex-col rounded-2xl border bg-white/90 p-3 text-left shadow-sm transition ${
-                            active
-                              ? "border-blue-500 ring-2 ring-blue-200"
-                              : "border-slate-200 hover:border-blue-300 hover:shadow-md"
-                          }`}
-                          aria-pressed={active}
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                    {availableVoiceProviders.length > 0 ? (
+                      <label className="flex items-center gap-2 text-xs font-medium text-slate-600 sm:text-sm">
+                        <span>供应商</span>
+                        <select
+                          value={selectedVoiceProvider}
+                          onChange={handleVoiceProviderChange}
+                          className="rounded-full border border-slate-200 bg-white px-3 py-1 text-sm text-slate-700 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
                         >
-                          <div className="aspect-[4/5] w-full overflow-hidden rounded-xl bg-slate-100">
-                            {cover ? (
-                              <img
-                                src={cover}
-                                alt={`${model.name} 预览`}
-                                className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
-                                loading="lazy"
-                              />
-                            ) : (
-                              <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
-                                无预览图
-                              </div>
-                            )}
-                          </div>
+                          {availableVoiceProviders.map((provider) => (
+                            <option
+                              key={provider.id}
+                              value={provider.id}
+                              disabled={!provider.enabled}
+                            >
+                              {provider.label}
+                              {!provider.enabled ? "（未启用）" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
 
-                          <div className="mt-2 flex items-start justify-between gap-2">
-                            <div className="flex flex-1 flex-col">
-                              <span className="text-sm font-medium text-slate-700">
-                                {model.name}
-                              </span>
-
-                              {description ? (
-                                <span className="mt-1 line-clamp-2 text-xs text-slate-500">
-                                  {description}
-                                </span>
-                              ) : null}
-                            </div>
-
-                            {active ? (
-                              <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-xs font-semibold text-blue-600">
-                                已选
-                              </span>
-                            ) : null}
-                          </div>
+                    <label className="relative flex-1">
+                      <span className="sr-only">搜索音色</span>
+                      <input
+                        id="agent-voice-search"
+                        type="text"
+                        value={voiceSearchTerm}
+                        onChange={(event) =>
+                          setVoiceSearchTerm(event.target.value)
+                        }
+                        placeholder="搜索音色或供应商"
+                        className="w-full rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      />
+                      {voiceSearchTerm ? (
+                        <button
+                          type="button"
+                          onClick={() => setVoiceSearchTerm("")}
+                          className="absolute inset-y-0 right-3 flex items-center text-xs text-slate-400 transition hover:text-slate-600"
+                          aria-label="清除搜索"
+                        >
+                          清除
                         </button>
-                      );
-                    })
+                      ) : null}
+                    </label>
+                    </div>
+                  </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white/80 p-2 shadow-inner max-h-80 overflow-y-auto">
+                  {filteredVoiceOptions.length > 0 ? (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {filteredVoiceOptions.map((option) => {
+                        const rawId = option?.id;
+                        if (rawId == null) {
+                          return null;
+                        }
+                        const value = String(rawId);
+                        const label =
+                          option?.display_name ??
+                          option?.displayName ??
+                          option?.name ??
+                          option?.nickname ??
+                          value;
+                        const isActive = values.voice_id === value;
+                        const isLoadingPreview =
+                          voicePreviewStatus.loading &&
+                          voicePreviewStatus.voiceId !== value;
+                        const isPlayingPreview =
+                          !voicePreviewStatus.loading &&
+                          voicePreviewStatus.voiceId === value;
+
+                        return (
+                          <label
+                            key={value}
+                            onClick={() => handleVoiceSelect(value)}
+                            className={`group flex cursor-pointer flex-col gap-2 rounded-2xl border p-4 transition ${
+                              isActive
+                                ? "border-blue-500 bg-blue-50/70 shadow"
+                                : "border-slate-200 bg-white hover:border-blue-300"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex flex-col">
+                                <span className="text-sm font-semibold text-slate-700">
+                                  {label}
+                                </span>
+                                <span className="text-xs text-slate-400">
+                                  {(option?.language ?? "未知语言") +
+                                    " · " +
+                                    (option?.provider ?? "未知提供方")}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  handleVoiceSelect(value);
+                                  handleVoicePreview(value);
+                                }}
+                                className="rounded-full border border-slate-300 px-3 py-1 text-xs font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-300"
+                                disabled={
+                                  voicePreviewStatus.loading &&
+                                  voicePreviewStatus.voiceId !== value
+                                }
+                              >
+                                {isLoadingPreview
+                                  ? "加载中..."
+                                  : isPlayingPreview
+                                    ? "停止"
+                                    : "试听"}
+                              </button>
+                            </div>
+                            {option?.description ? (
+                              <p className="text-xs text-slate-500">
+                                {option.description}
+                              </p>
+                            ) : null}
+                            <input
+                              type="radio"
+                              name="voice_id"
+                              value={value}
+                              checked={values.voice_id === value}
+                              onChange={handleChange}
+                              className="sr-only"
+                            />
+                          </label>
+                        );
+                      })}
+                    </div>
                   ) : (
-                    <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
-                      暂无可用的 Live2D 模型，请先在后台添加。
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
+                      {filteredVoiceOptions.length === 0
+                        ? "暂无可选音色，将使用系统默认音色。"
+                        : "未找到匹配的音色，请尝试其他关键词。"}
                     </div>
                   )}
                 </div>
-              </section>
 
-              <section className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-slate-600">
-                    选择 AI 模型
-                  </span>
-                  {chatModelStatus.loading ? (
-                    <span className="text-xs text-slate-400">加载中...</span>
-                  ) : chatModelStatus.error ? (
-                    <span className="text-xs text-amber-500">
-                      {chatModelStatus.error}
-                    </span>
-                  ) : (
-                    <span className="text-xs text-slate-400">
-                      {chatModelOptions.length} 个可选
-                    </span>
-                  )}
-                </div>
-                <select
-                  value={chatModelSelectValue}
-                  onChange={handleChatModelPresetChange}
-                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                >
-                  <option value="" disabled>
-                    请选择一个可用模型
-                  </option>
-                  {chatModelOptions.map((model) => (
-                    <option key={model.key} value={model.key}>
-                      {model.displayName} · {model.providerLabel}
-                      {model.recommended ? "（推荐）" : ""}
-                    </option>
-                  ))}
-                </select>
-                {selectedChatModel ? (
-                  <div className="text-xs text-slate-500">
-                    {chatModelDescription ? (
-                      <p>{chatModelDescription}</p>
-                    ) : null}
-                    {chatModelCapabilities.length ? (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {chatModelCapabilities.map((capability) => (
-                          <span
-                            key={`${selectedChatModel?.key ?? "preset"}-${capability}`}
-                            className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600"
-                          >
-                            {capability}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <p className="text-xs text-amber-600">
-                    请选择上方的模型后再提交。
+                {voicePreviewStatus.error ? (
+                  <p className="text-xs text-rose-500">
+                    {voicePreviewStatus.error}
                   </p>
-                )}
+                ) : null}
               </section>
-              <p className="text-xs text-slate-400">
-                当前将使用：{values.model_provider || "未选择"} /{" "}
-                {values.model_name || "未选择"}
-              </p>
 
               <div className="grid gap-4 md:grid-cols-2">
-                
                 <label className="flex flex-col gap-2">
                   <span className="text-sm font-medium text-slate-600">
                     智能体名称 *
@@ -1205,7 +1778,7 @@ const populateFormFromAgent = useCallback(
                     {success.status ? (
                       <span
                         className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClasses(
-                          success.status
+                          success.status,
                         )}`}
                       >
                         状态：{formatStatusLabel(success.status)}
@@ -1247,3 +1820,4 @@ const populateFormFromAgent = useCallback(
     </div>
   );
 }
+

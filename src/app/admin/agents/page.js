@@ -13,6 +13,54 @@ import {
 } from "@/lib/chatModels";
 
 const API_BASE_URL = getApiBaseUrl();
+const VOICE_PREVIEW_SAMPLE = "你好，欢迎来到Auralis";
+
+function findDefaultVoiceForProvider(providerId, voiceProviders, voiceOptions) {
+  const normalized = String(providerId ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+
+  let preferredVoiceId = "";
+  if (Array.isArray(voiceProviders)) {
+    const providerEntry = voiceProviders.find((item) => {
+      const idValue = String(item?.id ?? item?.ID ?? "").trim();
+      return idValue && idValue.toLowerCase() === normalized;
+    });
+    preferredVoiceId = providerEntry
+      ? String(providerEntry?.default_voice ?? providerEntry?.defaultVoice ?? "").trim()
+      : "";
+  }
+
+  if (preferredVoiceId && Array.isArray(voiceOptions)) {
+    const exists = voiceOptions.some(
+      (option) =>
+        String(option?.id ?? "")
+          .trim()
+          .toLowerCase() === preferredVoiceId.toLowerCase(),
+    );
+    if (exists) {
+      return preferredVoiceId;
+    }
+  }
+
+  if (Array.isArray(voiceOptions)) {
+    const match = voiceOptions.find((option) => {
+      const providerValue = String(
+        option?.provider ?? option?.Provider ?? "",
+      )
+        .trim()
+        .toLowerCase();
+      return providerValue === normalized;
+    });
+    if (match && match.id != null) {
+      return String(match.id).trim();
+    }
+  }
+
+  return "";
+}
+
 
 const STATUS_FILTER_OPTIONS = [
   { value: "pending", label: "Pending" },
@@ -85,9 +133,12 @@ function pickStoredToken() {
   return null;
 }
 
-function deriveHeaders(extra) {
+function deriveHeaders(extra, options = {}) {
   const headers = new Headers(extra);
   headers.set("Accept", "application/json");
+  if (options.contentType) {
+    headers.set("Content-Type", options.contentType);
+  }
   const token = pickStoredToken();
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
@@ -107,6 +158,8 @@ const emptyForm = {
   max_tokens: "",
   system_prompt: "",
   status: "active",
+  voice_id: "",
+  voice_provider: "",
   avatar_url: "",
 };
 
@@ -143,6 +196,44 @@ export default function AdminAgentsPage() {
     loading: false,
     error: null,
   });
+
+  const voicePreviewAudioRef = useRef(null);
+  const [voiceStatus, setVoiceStatus] = useState({
+    loading: false,
+    error: null,
+    enabled: false,
+    defaultVoice: "",
+  });
+  const [voiceOptions, setVoiceOptions] = useState([]);
+  const [voiceProviders, setVoiceProviders] = useState([]);
+  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState("");
+  const [voicePreviewStatus, setVoicePreviewStatus] = useState({
+    loading: false,
+    voiceId: "",
+    error: null,
+  });
+  const [voiceSearchTerm, setVoiceSearchTerm] = useState("");
+  const initialVoiceProviderRef = useRef("");
+
+  const stopVoicePreview = useCallback(() => {
+    const audio = voicePreviewAudioRef.current;
+    if (audio) {
+      try {
+        audio.pause();
+      } catch (previewError) {
+        console.warn("voice preview pause failed", previewError);
+      }
+      try {
+        audio.currentTime = 0;
+      } catch (timeError) {
+        // ignore reset timing errors
+      }
+      audio.onended = null;
+      audio.onerror = null;
+    }
+    voicePreviewAudioRef.current = null;
+    setVoicePreviewStatus({ loading: false, voiceId: "", error: null });
+  }, []);
 
   const avatarPreviewUrl = useMemo(() => {
     if (!avatarFile) {
@@ -308,6 +399,121 @@ export default function AdminAgentsPage() {
     };
   }, [isAdmin]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    setVoiceStatus((prev) => ({ ...prev, loading: true, error: null }));
+
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/tts/voices`, {
+          method: "GET",
+          headers: deriveHeaders(),
+          credentials: "include",
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`音色列表加载失败 (${response.status})`);
+        }
+
+        const data = await response.json();
+        const voices = Array.isArray(data?.voices) ? data.voices : [];
+        const providers = Array.isArray(data?.providers) ? data.providers : [];
+
+        setVoiceOptions(voices);
+        setVoiceProviders(providers);
+
+        const defaultProviderFromAPI = String(data?.default_provider ?? "").trim();
+        const normalizedProviders = providers
+          .map((item) => ({
+            id: String(item?.id ?? "").trim(),
+            enabled: Boolean(item?.enabled),
+            defaultVoice: String(
+              item?.default_voice ?? item?.defaultVoice ?? "",
+            ).trim(),
+          }))
+          .filter((item) => item.id);
+
+        const determineDefaultProvider = () => {
+          const existing = String(initialVoiceProviderRef.current ?? "").trim();
+          if (existing) {
+            return existing;
+          }
+          if (defaultProviderFromAPI) {
+            return defaultProviderFromAPI;
+          }
+          const active = normalizedProviders.find((item) => item.enabled);
+          if (active) {
+            return active.id;
+          }
+          if (normalizedProviders.length > 0) {
+            return normalizedProviders[0].id;
+          }
+          if (voices.length > 0) {
+            const providerId = String(
+              voices[0]?.provider ?? voices[0]?.Provider ?? "",
+            ).trim();
+            if (providerId) {
+              return providerId;
+            }
+          }
+          return "";
+        };
+
+        const preferredProvider = determineDefaultProvider();
+        const defaultVoiceForProvider = findDefaultVoiceForProvider(
+          preferredProvider,
+          providers,
+          voices,
+        );
+
+        setVoiceStatus({
+          loading: false,
+          error: null,
+          enabled: voices.length > 0 && Boolean(data?.enabled),
+          defaultVoice: defaultVoiceForProvider,
+        });
+
+        setSelectedVoiceProvider(preferredProvider);
+        setFormValues((prev) => {
+          const updates = {};
+          let changed = false;
+          if (!String(prev.voice_provider ?? "").trim() && preferredProvider) {
+            updates.voice_provider = preferredProvider;
+            changed = true;
+          }
+          if (!String(prev.voice_id ?? "").trim() && defaultVoiceForProvider) {
+            updates.voice_id = String(defaultVoiceForProvider);
+            changed = true;
+          }
+          return changed ? { ...prev, ...updates } : prev;
+        });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        console.error(error);
+        setVoiceOptions([]);
+        setVoiceProviders([]);
+        setVoiceStatus({
+          loading: false,
+          error: error?.message ?? "音色列表加载失败",
+          enabled: false,
+          defaultVoice: "",
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setFormValues]);
+
   const chatModelOptions = useMemo(
     () => sortChatModels(chatModels),
     [chatModels],
@@ -355,6 +561,150 @@ export default function AdminAgentsPage() {
   const chatModelDescription = selectedChatModel?.description ?? "";
   const chatModelCapabilities = selectedChatModel?.capabilities ?? [];
 
+  const selectedVoiceOption = useMemo(() => {
+    if (!formValues.voice_id) {
+      return null;
+    }
+    const target = String(formValues.voice_id).toLowerCase();
+    return (
+      voiceOptions.find(
+        (item) => String(item?.id ?? "").toLowerCase() === target,
+      ) ?? null
+    );
+  }, [formValues.voice_id, voiceOptions]);
+
+  const availableVoiceProviders = useMemo(() => {
+    if (voiceProviders.length > 0) {
+      return voiceProviders
+        .map((item) => {
+          const id = String(item?.id ?? "").trim();
+          if (!id) {
+            return null;
+          }
+          const label = String(item?.label ?? item?.id ?? id).trim() || id;
+          return {
+            id,
+            label,
+            enabled: Boolean(item?.enabled),
+          };
+        })
+        .filter(Boolean);
+    }
+
+    const uniqueProviders = new Map();
+    voiceOptions.forEach((option) => {
+      const providerId = String(option?.provider ?? option?.Provider ?? "").trim();
+      if (!providerId || uniqueProviders.has(providerId)) {
+        return;
+      }
+      uniqueProviders.set(providerId, {
+        id: providerId,
+        label: providerId,
+        enabled: true,
+      });
+    });
+    return Array.from(uniqueProviders.values());
+  }, [voiceOptions, voiceProviders]);
+
+  const voiceSearchToken = useMemo(
+    () => voiceSearchTerm.trim().toLowerCase(),
+    [voiceSearchTerm],
+  );
+
+  const filteredVoiceOptions = useMemo(() => {
+    if (!voiceOptions.length) {
+      return [];
+    }
+
+    const normalizedProvider = String(selectedVoiceProvider ?? "")
+      .trim()
+      .toLowerCase();
+    const baseList = voiceOptions.filter((option) => {
+      if (!normalizedProvider) {
+        return true;
+      }
+      const optionProvider = String(
+        option?.provider ?? option?.Provider ?? "",
+      )
+        .trim()
+        .toLowerCase();
+      return optionProvider === normalizedProvider;
+    });
+
+    if (!voiceSearchToken) {
+      return baseList;
+    }
+
+    return baseList.filter((option) => {
+      const parts = [
+        option?.display_name,
+        option?.displayName,
+        option?.name,
+        option?.nickname,
+        option?.language,
+        option?.provider,
+      ]
+        .filter((value) => typeof value === "string")
+        .map((value) => value.toLowerCase());
+      return parts.some((part) => part.includes(voiceSearchToken));
+    });
+  }, [voiceOptions, selectedVoiceProvider, voiceSearchToken]);
+
+  useEffect(() => {
+    const providerValue = String(formValues.voice_provider ?? "").trim();
+    if (!providerValue) {
+      return;
+    }
+    setSelectedVoiceProvider((prev) =>
+      prev === providerValue ? prev : providerValue,
+    );
+  }, [formValues.voice_provider]);
+
+  useEffect(() => {
+    if (!selectedVoiceProvider) {
+      return;
+    }
+    const currentVoice = String(formValues.voice_id ?? "")
+      .trim()
+      .toLowerCase();
+    const exists = filteredVoiceOptions.some(
+      (option) =>
+        String(option?.id ?? "")
+          .trim()
+          .toLowerCase() === currentVoice,
+    );
+    if (exists) {
+      return;
+    }
+    const fallbackVoice =
+      filteredVoiceOptions.length > 0
+        ? String(filteredVoiceOptions[0]?.id ?? "")
+        : "";
+    if (!fallbackVoice && !currentVoice) {
+      return;
+    }
+    setFormValues((prev) => {
+      if (fallbackVoice) {
+        return { ...prev, voice_id: fallbackVoice };
+      }
+      if (!prev.voice_id) {
+        return prev;
+      }
+      return { ...prev, voice_id: "" };
+    });
+  }, [
+    filteredVoiceOptions,
+    selectedVoiceProvider,
+    formValues.voice_id,
+    setFormValues,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      stopVoicePreview();
+    };
+  }, [stopVoicePreview]);
+
   useEffect(() => {
     if (!selectedAgentId || !isAdmin) {
       return;
@@ -400,51 +750,81 @@ export default function AdminAgentsPage() {
     };
   }, [selectedAgentId, isAdmin]);
 
-  const applyAgentDetail = useCallback((detailData) => {
-    if (!detailData?.agent) {
-      return;
-    }
-    const detail = detailData.agent;
-    const config = detailData.chat_config ?? detailData.chatConfig ?? {};
-
-    let temperature = "";
-    let maxTokens = "";
-    const paramsRaw = config.model_params ?? config.modelParams;
-    if (paramsRaw) {
-      try {
-        const parsed =
-          typeof paramsRaw === "string" ? JSON.parse(paramsRaw) : paramsRaw;
-        if (parsed && typeof parsed === "object") {
-          if (parsed.temperature !== undefined) {
-            temperature = String(parsed.temperature);
-          }
-          if (parsed.max_tokens !== undefined) {
-            maxTokens = String(parsed.max_tokens);
-          }
-        }
-      } catch (error) {
-        console.warn("Failed to parse model params", error);
+  const applyAgentDetail = useCallback(
+    (detailData) => {
+      if (!detailData?.agent) {
+        return;
       }
-    }
 
-    setFormValues({
-      name: detail?.name ?? "",
-      one_sentence_intro:
-        detail?.one_sentence_intro ?? detail?.oneSentenceIntro ?? "",
-      persona_desc: detail?.persona_desc ?? "",
-      opening_line: detail?.opening_line ?? "",
-      first_turn_hint: detail?.first_turn_hint ?? "",
-      model_provider: config?.model_provider ?? "",
-      model_name: config?.model_name ?? "",
-      temperature,
-      max_tokens: maxTokens,
-      system_prompt: config?.system_prompt ?? "",
-      status: detail?.status ?? "pending",
-      avatar_url: detail?.avatar_url ?? detail?.avatarUrl ?? "",
-    });
-    setAvatarFile(null);
-    setRemoveAvatar(false);
-  }, []);
+      stopVoicePreview();
+
+      const detail = detailData.agent;
+      const config = detailData.chat_config ?? detailData.chatConfig ?? {};
+
+      let temperature = "";
+      let maxTokens = "";
+      const paramsRaw = config.model_params ?? config.modelParams;
+      if (paramsRaw) {
+        try {
+          const parsed =
+            typeof paramsRaw === "string" ? JSON.parse(paramsRaw) : paramsRaw;
+          if (parsed && typeof parsed === "object") {
+            if (parsed.temperature !== undefined) {
+              temperature = String(parsed.temperature);
+            }
+            if (parsed.max_tokens !== undefined) {
+              maxTokens = String(parsed.max_tokens);
+            }
+          }
+        } catch (error) {
+          console.warn("Failed to parse model params", error);
+        }
+      }
+
+      const voiceProviderValue = String(
+        detail?.voice_provider ?? detail?.voiceProvider ?? "",
+      ).trim();
+      const voiceIdValue = String(
+        detail?.voice_id ?? detail?.voiceId ?? "",
+      ).trim();
+
+      initialVoiceProviderRef.current = voiceProviderValue;
+      if (voiceProviderValue) {
+        setSelectedVoiceProvider((prev) =>
+          prev === voiceProviderValue ? prev : voiceProviderValue,
+        );
+      }
+      setVoiceSearchTerm("");
+
+      setFormValues({
+        name: detail?.name ?? "",
+        one_sentence_intro:
+          detail?.one_sentence_intro ?? detail?.oneSentenceIntro ?? "",
+        persona_desc: detail?.persona_desc ?? "",
+        opening_line: detail?.opening_line ?? "",
+        first_turn_hint: detail?.first_turn_hint ?? "",
+        model_provider: config?.model_provider ?? "",
+        model_name: config?.model_name ?? "",
+        temperature,
+        max_tokens: maxTokens,
+        system_prompt: config?.system_prompt ?? "",
+        status: detail?.status ?? "pending",
+        voice_id: voiceIdValue,
+        voice_provider: voiceProviderValue,
+        avatar_url: detail?.avatar_url ?? detail?.avatarUrl ?? "",
+      });
+      setAvatarFile(null);
+      setRemoveAvatar(false);
+    },
+    [
+      setFormValues,
+      setAvatarFile,
+      setRemoveAvatar,
+      stopVoicePreview,
+      setSelectedVoiceProvider,
+      setVoiceSearchTerm,
+    ],
+  );
 
   useEffect(() => {
     if (agentDetail?.agent) {
@@ -473,8 +853,203 @@ export default function AdminAgentsPage() {
     [setFormValues],
   );
 
+  const handleVoiceProviderChange = useCallback(
+    (event) => {
+      const rawValue = event?.target?.value ?? "";
+      const nextProvider = String(rawValue).trim();
+
+      stopVoicePreview();
+      setSelectedVoiceProvider(nextProvider);
+      setVoiceSearchTerm("");
+
+      setFormValues((prev) => {
+        const nextState = { ...prev, voice_provider: nextProvider };
+        const normalizedProvider = nextProvider.toLowerCase();
+        const currentVoice = String(prev.voice_id ?? "").trim();
+        let keepCurrent = false;
+        if (currentVoice && normalizedProvider) {
+          const currentOption = voiceOptions.find(
+            (option) =>
+              String(option?.id ?? "")
+                .trim()
+                .toLowerCase() === currentVoice.toLowerCase(),
+          );
+          if (currentOption) {
+            const optionProvider = String(
+              currentOption?.provider ?? currentOption?.Provider ?? "",
+            )
+              .trim()
+              .toLowerCase();
+            keepCurrent = optionProvider === normalizedProvider;
+          }
+        }
+
+        if (!keepCurrent) {
+          const fallbackVoice = findDefaultVoiceForProvider(
+            nextProvider,
+            voiceProviders,
+            voiceOptions,
+          );
+          nextState.voice_id = fallbackVoice || "";
+        }
+
+        return nextState;
+      });
+    },
+    [
+      setFormValues,
+      setSelectedVoiceProvider,
+      setVoiceSearchTerm,
+      stopVoicePreview,
+      voiceOptions,
+      voiceProviders,
+    ],
+  );
+
+  const handleVoicePreview = useCallback(
+    async (voiceId) => {
+      const target = String(voiceId ?? "").trim();
+      if (!target) {
+        setVoicePreviewStatus({
+          loading: false,
+          voiceId: "",
+          error: "请先选择音色再试听",
+        });
+        return;
+      }
+
+      if (
+        voicePreviewStatus.voiceId === target &&
+        !voicePreviewStatus.loading
+      ) {
+        stopVoicePreview();
+        return;
+      }
+
+      stopVoicePreview();
+      setVoicePreviewStatus({ loading: true, voiceId: target, error: null });
+
+      const option =
+        voiceOptions.find(
+          (item) =>
+            String(item?.id ?? "").toLowerCase() === target.toLowerCase(),
+        ) ?? null;
+
+      const providerForPreview = String(
+        selectedVoiceProvider ||
+          formValues.voice_provider ||
+          option?.provider ||
+          option?.Provider ||
+          "",
+      ).trim();
+
+      let audioSrc = option?.sample_url ?? option?.sampleUrl ?? "";
+
+      try {
+        if (!audioSrc) {
+          const response = await fetch(`${API_BASE_URL}/tts/preview`, {
+            method: "POST",
+            headers: deriveHeaders({}, { contentType: "application/json" }),
+            credentials: "include",
+            body: JSON.stringify({
+              text: VOICE_PREVIEW_SAMPLE,
+              voice_id: target,
+              provider: providerForPreview,
+            }),
+          });
+          if (!response.ok) {
+            const fallbackMessage = await response.text();
+            throw new Error(fallbackMessage || `试听失败 (${response.status})`);
+          }
+          const data = await response.json();
+          const speech = data?.speech ?? {};
+          const base64 = speech?.audio_base64 ?? "";
+          const mime = speech?.mime_type ?? "audio/mpeg";
+          if (!base64) {
+            throw new Error("音频内容缺失");
+          }
+          audioSrc = `data:${mime};base64,${base64}`;
+        }
+
+        const audio = new Audio(audioSrc);
+        voicePreviewAudioRef.current = audio;
+        audio.onended = () => {
+          voicePreviewAudioRef.current = null;
+          setVoicePreviewStatus({ loading: false, voiceId: "", error: null });
+        };
+        audio.onerror = () => {
+          voicePreviewAudioRef.current = null;
+          setVoicePreviewStatus({
+            loading: false,
+            voiceId: "",
+            error: "音频播放失败",
+          });
+        };
+        let playbackAborted = false;
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.then === "function") {
+          try {
+            await playPromise;
+          } catch (playbackError) {
+            if (playbackError?.name === "AbortError") {
+              playbackAborted = true;
+              console.debug("Voice preview playback interrupted");
+            } else {
+              throw playbackError;
+            }
+          }
+        }
+        if (playbackAborted) {
+          return;
+        }
+        setVoicePreviewStatus({ loading: false, voiceId: target, error: null });
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          console.debug("Voice preview playback cancelled");
+          return;
+        }
+        console.error(error);
+        voicePreviewAudioRef.current = null;
+        setVoicePreviewStatus({
+          loading: false,
+          voiceId: "",
+          error: error?.message ?? "试听失败",
+        });
+      }
+    },
+    [
+      voiceOptions,
+      voicePreviewStatus.loading,
+      voicePreviewStatus.voiceId,
+      stopVoicePreview,
+      selectedVoiceProvider,
+      formValues.voice_provider,
+    ],
+  );
+
+  const handleVoiceSelect = useCallback(
+    (voiceId) => {
+      const nextVoiceId = String(voiceId ?? "").trim();
+      if (!nextVoiceId) {
+        return;
+      }
+
+      setFormValues((prev) => {
+        if (prev.voice_id === nextVoiceId) {
+          return prev;
+        }
+        return { ...prev, voice_id: nextVoiceId };
+      });
+      stopVoicePreview();
+    },
+    [setFormValues, stopVoicePreview],
+  );
+
   const handleInputChange = (event) => {
     const { name, value } = event.target;
+    if (name === "voice_id") {
+      stopVoicePreview();
+    }
     setFormValues((prev) => ({ ...prev, [name]: value }));
   };
 
@@ -533,11 +1108,11 @@ export default function AdminAgentsPage() {
       );
       const provider = (formValues.model_provider ?? "").trim();
       const modelName = (formValues.model_name ?? "").trim();
-      if (!providerValue || !modelNameValue) {
+      if (!provider || !modelName) {
         throw new Error("请先选择一个可用的 AI 模型");
       }
-      formData.append("model_provider", providerValue);
-      formData.append("model_name", modelNameValue);
+      formData.append("model_provider", provider);
+      formData.append("model_name", modelName);
       formData.append("system_prompt", formValues.system_prompt ?? "");
       formData.append("status", formValues.status.trim() || "active");
 
@@ -555,6 +1130,17 @@ export default function AdminAgentsPage() {
         if (!Number.isNaN(maxTokensNumber)) {
           formData.append("max_tokens", String(maxTokensNumber));
         }
+      }
+
+      const voiceIdValue = (formValues.voice_id ?? "").trim();
+      if (voiceIdValue) {
+        formData.append("voice_id", voiceIdValue);
+        const voiceProviderValue = (formValues.voice_provider ?? "").trim();
+        if (voiceProviderValue) {
+          formData.append("voice_provider", voiceProviderValue);
+        }
+      } else if (voiceStatus.enabled && voiceOptions.length > 0) {
+        throw new Error("请选择音色");
       }
 
       if (avatarFile) {
@@ -1021,6 +1607,193 @@ export default function AdminAgentsPage() {
                     {formValues.model_name || "未选择"}
                   </p>
 
+                  <section className="space-y-3">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <span className="text-sm font-medium text-slate-600">
+                        音色选择
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        {voiceStatus.loading ? (
+                          <span className="text-slate-400">音色列表加载中...</span>
+                        ) : null}
+                        {voiceStatus.error ? (
+                          <span className="text-rose-500">{voiceStatus.error}</span>
+                        ) : null}
+                        {!voiceStatus.loading && !voiceStatus.error ? (
+                          <span className="text-slate-400">
+                            {filteredVoiceOptions.length} 个候选
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                        {availableVoiceProviders.length > 0 ? (
+                          <label className="flex items-center gap-2 text-xs font-medium text-slate-600 sm:text-sm">
+                            <span>提供商</span>
+                            <select
+                              value={selectedVoiceProvider}
+                              onChange={handleVoiceProviderChange}
+                              className="rounded-full border border-slate-200 bg-white px-3 py-1 text-sm text-slate-700 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                            >
+                              {availableVoiceProviders.map((provider) => (
+                                <option
+                                  key={provider.id}
+                                  value={provider.id}
+                                  disabled={!provider.enabled}
+                                >
+                                  {provider.label}
+                                  {!provider.enabled ? "（未启用）" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+
+                        <label className="relative flex-1">
+                          <span className="sr-only">搜索音色</span>
+                          <input
+                            type="text"
+                            value={voiceSearchTerm}
+                            onChange={(event) => setVoiceSearchTerm(event.target.value)}
+                            placeholder="搜索音色或提供商"
+                            className="w-full rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                          />
+                          {voiceSearchTerm ? (
+                            <button
+                              type="button"
+                              onClick={() => setVoiceSearchTerm("")}
+                              className="absolute inset-y-0 right-3 flex items-center text-xs text-slate-400 transition hover:text-slate-600"
+                              aria-label="清除搜索"
+                            >
+                              清除
+                            </button>
+                          ) : null}
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="max-h-80 overflow-y-auto rounded-2xl border border-slate-200 bg-white/80 p-2 shadow-inner">
+                      {filteredVoiceOptions.length > 0 ? (
+                        <div className="grid gap-3 md:grid-cols-2">
+                          {filteredVoiceOptions.map((option) => {
+                            const rawId = option?.id;
+                            if (rawId == null) {
+                              return null;
+                            }
+                            const value = String(rawId);
+                            const label =
+                              option?.display_name ??
+                              option?.displayName ??
+                              option?.name ??
+                              option?.nickname ??
+                              value;
+                            const languageLabel = option?.language ?? "未知语言";
+                            const providerLabel =
+                              option?.provider ?? option?.Provider ?? "未知提供商";
+                            const isActive = formValues.voice_id === value;
+                            const isLoadingPreview =
+                              voicePreviewStatus.loading &&
+                              voicePreviewStatus.voiceId !== value;
+                            const isPlayingPreview =
+                              !voicePreviewStatus.loading &&
+                              voicePreviewStatus.voiceId === value;
+
+                            return (
+                              <label
+                                key={value}
+                                onClick={() => handleVoiceSelect(value)}
+                                className={`group flex cursor-pointer flex-col gap-2 rounded-2xl border p-4 transition ${
+                                  isActive
+                                    ? "border-blue-500 bg-blue-50/70 shadow"
+                                    : "border-slate-200 bg-white hover:border-blue-300"
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="flex flex-col">
+                                    <span className="text-sm font-semibold text-slate-700">
+                                      {label}
+                                    </span>
+                                    <span className="text-xs text-slate-400">
+                                      {languageLabel} · {providerLabel}
+                                    </span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      handleVoiceSelect(value);
+                                      handleVoicePreview(value);
+                                    }}
+                                    className="rounded-full border border-slate-300 px-3 py-1 text-xs font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-300"
+                                    disabled={
+                                      voicePreviewStatus.loading &&
+                                      voicePreviewStatus.voiceId !== value
+                                    }
+                                  >
+                                    {isLoadingPreview
+                                      ? "试听中..."
+                                      : isPlayingPreview
+                                        ? "停止"
+                                        : "试听"}
+                                  </button>
+                                </div>
+                                {option?.description ? (
+                                  <p className="text-xs text-slate-500">
+                                    {option.description}
+                                  </p>
+                                ) : null}
+                                <input
+                                  type="radio"
+                                  name="voice_id"
+                                  value={value}
+                                  checked={formValues.voice_id === value}
+                                  onChange={handleInputChange}
+                                  className="sr-only"
+                                />
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
+                          {voiceStatus.loading
+                            ? "音色列表加载中，请稍候..."
+                            : voiceOptions.length === 0
+                              ? "暂无可用音色，请检查语音服务配置。"
+                              : "未找到匹配音色，请尝试调整筛选条件。"}
+                        </div>
+                      )}
+                    </div>
+
+                    {voicePreviewStatus.error ? (
+                      <p className="text-xs text-rose-500">
+                        {voicePreviewStatus.error}
+                      </p>
+                    ) : null}
+                  </section>
+                  <p className="text-xs text-slate-400">
+                    当前音色：
+                    {selectedVoiceOption
+                      ? `${
+                          selectedVoiceOption?.display_name ??
+                          selectedVoiceOption?.displayName ??
+                          selectedVoiceOption?.name ??
+                          selectedVoiceOption?.nickname ??
+                          selectedVoiceOption?.id ??
+                          ""
+                        } / ${
+                          selectedVoiceOption?.provider ??
+                          selectedVoiceOption?.Provider ??
+                          "未知提供商"
+                        }`
+                      : voiceStatus.enabled
+                        ? "未选择"
+                        : "语音服务未开启"}
+                  </p>
+
                   <div className="grid gap-4 md:grid-cols-2">
                     <label className="flex flex-col gap-2">
                       <span className="text-sm font-medium text-slate-600">
@@ -1105,3 +1878,6 @@ export default function AdminAgentsPage() {
     </div>
   );
 }
+
+
+

@@ -1,6 +1,6 @@
-﻿/* eslint-disable @next/next/no-img-element */
-"use client";
+/* eslint-disable @next/next/no-img-element */
 
+"use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiBaseUrl } from "@/lib/api";
 import { resolveAssetUrl } from "@/lib/media";
@@ -69,6 +69,132 @@ function clamp(number, min, max) {
     return min;
   }
   return Math.min(Math.max(number, min), max);
+}
+
+const SPEECH_PLAYBACK_ERROR_HINT =
+  "\u8bed\u97f3\u64ad\u653e\u5931\u8d25\uff0c\u8bf7\u70b9\u51fb\u6d88\u606f\u4e2d\u7684\u64ad\u653e\u6309\u94ae\u91cd\u8bd5\u3002";
+
+const MICROPHONE_PERMISSION_ERROR =
+  "无法访问麦克风，请在浏览器设置中开启权限后重试。";
+
+const MICROPHONE_UNSUPPORTED_ERROR =
+  "当前浏览器不支持麦克风，请尝试使用最新版 Chrome 或 Edge。";
+
+function getSpeechString(speech, ...keys) {
+  if (!speech || typeof speech !== "object") {
+    return "";
+  }
+  for (const key of keys) {
+    const value = speech?.[key];
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+  }
+  return "";
+}
+
+function hasSpeechAudioSource(speech) {
+  return (
+    getSpeechString(speech, "audio_url", "audioUrl") !== "" ||
+    getSpeechString(speech, "audio_base64", "audioBase64") !== ""
+  );
+}
+
+function decodeBase64ToUint8(base64) {
+  if (typeof base64 !== "string" || !base64) {
+    return null;
+  }
+  try {
+    const normalized = base64.replace(/\s+/g, "");
+    const binary = atob(normalized);
+    const length = binary.length;
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch (error) {
+    console.warn("Failed to decode base64 audio chunk", error);
+    return null;
+  }
+}
+
+function isMediaSourceSupported(mime) {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  if (
+    !window.MediaSource ||
+    typeof window.MediaSource.isTypeSupported !== "function"
+  ) {
+    return false;
+  }
+  const candidate = String(mime ?? "").trim();
+  if (!candidate) {
+    return false;
+  }
+  return window.MediaSource.isTypeSupported(candidate);
+}
+
+function isQiniuVoice(option) {
+  if (!option || typeof option !== "object") {
+    return false;
+  }
+  const provider = String(option.provider ?? "")
+    .trim()
+    .toLowerCase();
+  if (provider && provider.includes("qiniu")) {
+    return true;
+  }
+  const id = String(option.id ?? "")
+    .trim()
+    .toLowerCase();
+  return id.startsWith("qiniu");
+}
+
+function normalizeTokenValue(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return null;
+  }
+  return Math.round(numeric);
+}
+
+function formatTokenStats(message) {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const input = normalizeTokenValue(message.token_input ?? message.tokenInput);
+  const output = normalizeTokenValue(
+    message.token_output ?? message.tokenOutput,
+  );
+  const totalRaw = normalizeTokenValue(
+    message.token_total ?? message.tokenTotal,
+  );
+  const total =
+    totalRaw != null || (input == null && output == null)
+      ? totalRaw
+      : (input ?? 0) + (output ?? 0);
+  const segments = [];
+  if (input != null) {
+    segments.push(`Prompt ${input}`);
+  }
+  if (output != null) {
+    segments.push(`Completion ${output}`);
+  }
+  if (total != null) {
+    segments.push(`Total ${total}`);
+  }
+  if (segments.length === 0) {
+    return "";
+  }
+  return `Tokens: ${segments.join(" | ")}`;
 }
 
 function parseExtras(rawExtras) {
@@ -146,7 +272,6 @@ function normalizePeerRating(entry) {
   if (!entry || typeof entry !== "object") {
     return null;
   }
-
   const rawScore = Number(
     entry.score ?? entry.Score ?? entry.rating ?? entry.Rating ?? 0,
   );
@@ -154,33 +279,31 @@ function normalizePeerRating(entry) {
     return null;
   }
   const score = Math.max(1, Math.min(5, Math.round(rawScore)));
-
-  const idValue = entry.id ?? entry.ID ?? entry.rating_id ?? entry.ratingId ?? null;
+  const idValue =
+    entry.id ?? entry.ID ?? entry.rating_id ?? entry.ratingId ?? null;
   const agentIdValue = entry.agent_id ?? entry.agentId ?? null;
   const userIdValue = entry.user_id ?? entry.userId ?? null;
-
   const commentValue = (() => {
     const raw = entry.comment ?? entry.Comment ?? "";
     return typeof raw === "string" ? raw : "";
   })();
-
   const createdAtValue =
     entry.created_at ?? entry.createdAt ?? entry.CreatedAt ?? null;
   const updatedAtValue =
     entry.updated_at ?? entry.updatedAt ?? entry.UpdatedAt ?? createdAtValue;
-
   const displayNameRaw =
-    entry.user_display_name ?? entry.userDisplayName ?? entry.display_name ?? "";
+    entry.user_display_name ??
+    entry.userDisplayName ??
+    entry.display_name ??
+    "";
   const userDisplayName =
     typeof displayNameRaw === "string" && displayNameRaw.trim()
       ? displayNameRaw.trim()
       : "匿名用户";
-
   const avatarRaw =
     entry.user_avatar_url ?? entry.userAvatarUrl ?? entry.avatar_url ?? null;
   const userAvatarUrl =
     typeof avatarRaw === "string" && avatarRaw.trim() ? avatarRaw.trim() : null;
-
   const normalized = {
     id: idValue != null ? String(idValue) : null,
     agentId: agentIdValue != null ? String(agentIdValue) : null,
@@ -192,7 +315,6 @@ function normalizePeerRating(entry) {
     userDisplayName,
     userAvatarUrl,
   };
-
   if (!normalized.id) {
     const fallbackKeyParts = [
       normalized.userId ?? "anonymous",
@@ -201,7 +323,6 @@ function normalizePeerRating(entry) {
     ];
     normalized.id = fallbackKeyParts.join(":");
   }
-
   return normalized;
 }
 
@@ -229,16 +350,13 @@ function normalizeEmotionMeta(rawEmotion) {
   if (!rawEmotion) {
     return null;
   }
-
   const resolveLabel = (value) => {
     if (typeof value !== "string") {
       return "";
     }
     return value.trim().toLowerCase();
   };
-
   const fallbackMotion = (label) => EMOTION_MOTION_FALLBACKS[label] ?? "";
-
   if (typeof rawEmotion === "string") {
     const label = resolveLabel(rawEmotion) || "neutral";
     const normalizedLabel = EMOTION_DISPLAY_LABELS[label] ? label : "neutral";
@@ -258,11 +376,9 @@ function normalizeEmotionMeta(rawEmotion) {
       reason: "",
     };
   }
-
   if (typeof rawEmotion !== "object") {
     return null;
   }
-
   const labelCandidate = [
     rawEmotion.label,
     rawEmotion.Label,
@@ -278,7 +394,6 @@ function normalizeEmotionMeta(rawEmotion) {
     : "neutral";
   const displayLabel =
     EMOTION_DISPLAY_LABELS[normalizedLabel] ?? normalizedLabel;
-
   const intensityCandidate = [
     rawEmotion.intensity,
     rawEmotion.Intensity,
@@ -291,7 +406,6 @@ function normalizeEmotionMeta(rawEmotion) {
   }
   const minIntensity = normalizedLabel === "neutral" ? 0.25 : 0.55;
   const intensity = clamp(Math.max(intensityValue, minIntensity), 0, 1);
-
   const confidenceCandidate = [
     rawEmotion.confidence,
     rawEmotion.Confidence,
@@ -301,7 +415,6 @@ function normalizeEmotionMeta(rawEmotion) {
     confidenceValue = 0.45;
   }
   const confidence = clamp(Math.max(confidenceValue, 0.35), 0, 1);
-
   const motionCandidate = [
     rawEmotion.suggested_motion,
     rawEmotion.SuggestedMotion,
@@ -310,7 +423,6 @@ function normalizeEmotionMeta(rawEmotion) {
   ].find((value) => typeof value === "string" && value.trim());
   const fallback = fallbackMotion(normalizedLabel);
   const motionKey = motionCandidate ? motionCandidate.trim() : fallback;
-
   const holdCandidate = [
     rawEmotion.hold_ms,
     rawEmotion.holdMs,
@@ -322,12 +434,10 @@ function normalizeEmotionMeta(rawEmotion) {
   if (Number.isFinite(holdNumber) && holdNumber >= 0) {
     holdMs = holdNumber;
   }
-
   const reason =
     [rawEmotion.reason, rawEmotion.Reason].find(
       (value) => typeof value === "string" && value.trim(),
     ) || "";
-
   return {
     label: normalizedLabel,
     display_label: displayLabel,
@@ -346,6 +456,19 @@ function normalizeMessage(message) {
     return null;
   }
   const extras = parseExtras(message.extras ?? message.Extras);
+  const tokenInput = normalizeTokenValue(
+    message.token_input ?? message.tokenInput ?? message.TokenInput,
+  );
+  const tokenOutput = normalizeTokenValue(
+    message.token_output ?? message.tokenOutput ?? message.TokenOutput,
+  );
+  const tokenTotalRaw = normalizeTokenValue(
+    message.token_total ?? message.tokenTotal ?? message.TokenTotal,
+  );
+  const tokenTotal =
+    tokenTotalRaw != null || (tokenInput == null && tokenOutput == null)
+      ? tokenTotalRaw
+      : (tokenInput ?? 0) + (tokenOutput ?? 0);
   return {
     ...message,
     id: message.id ?? message.ID ?? null,
@@ -354,6 +477,9 @@ function normalizeMessage(message) {
     content: message.content ?? message.Content ?? "",
     created_at: message.created_at ?? message.createdAt ?? null,
     extrasParsed: extras,
+    token_input: tokenInput,
+    token_output: tokenOutput,
+    token_total: tokenTotal,
   };
 }
 
@@ -378,6 +504,12 @@ export default function ChatPanel({
   onRatingControllerChange,
 }) {
   const [userId, setUserId] = useState(null);
+  const [userProfile, setUserProfile] = useState({
+    displayName: "",
+    avatarUrl: "",
+  });
+  const [tokenBalance, setTokenBalance] = useState(null);
+  const [insufficientTokens, setInsufficientTokens] = useState(false);
   const [conversationId, setConversationId] = useState(null);
   const [profileStatus, setProfileStatus] = useState({
     loading: false,
@@ -393,6 +525,70 @@ export default function ChatPanel({
     error: null,
   });
   const [inputValue, setInputValue] = useState("");
+  const patchMessageSpeechExtras = useCallback(
+    (messageId, mutate) => {
+      if (messageId === null || messageId === undefined) {
+        return;
+      }
+      const key = String(messageId);
+      setMessages((prev) => {
+        let changed = false;
+        const updated = prev.map((item) => {
+          const itemKey = String(item?.id ?? item?.ID ?? item?.clientId ?? "");
+          if (itemKey !== key) {
+            return item;
+          }
+          const extras = { ...(item.extrasParsed ?? {}) };
+          if (typeof mutate === "function") {
+            mutate(extras);
+          }
+          changed = true;
+          return {
+            ...item,
+            extrasParsed: extras,
+          };
+        });
+        if (changed) {
+          messagesRef.current = updated;
+        }
+        return updated;
+      });
+    },
+    [setMessages],
+  );
+  const updateMessageExtras = useCallback(
+    (messageId, mutator) => {
+      if (!messageId) {
+        return null;
+      }
+      const key = String(messageId);
+      const current = messagesRef.current.find(
+        (item) => String(item?.id ?? item?.ID ?? item?.clientId ?? "") === key,
+      );
+      if (!current) {
+        return null;
+      }
+      const extras = { ...(current.extrasParsed ?? {}) };
+      if (typeof mutator === "function") {
+        mutator(extras);
+      }
+      const updated = { ...current, extrasParsed: extras };
+      setMessages((prev) =>
+        prev.map((item) =>
+          String(item?.id ?? item?.ID ?? item?.clientId ?? "") === key
+            ? updated
+            : item,
+        ),
+      );
+      messagesRef.current = messagesRef.current.map((item) =>
+        String(item?.id ?? item?.ID ?? item?.clientId ?? "") === key
+          ? updated
+          : item,
+      );
+      return updated;
+    },
+    [setMessages],
+  );
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState(null);
   const [currentRatingSummary, setCurrentRatingSummary] = useState(() =>
@@ -427,20 +623,38 @@ export default function ChatPanel({
   const ratingControllerRef = useRef(null);
   const peerRatingsPageSizeRef = useRef(DEFAULT_REVIEWS_PAGE_SIZE);
   const recognitionRef = useRef(null);
-
+  const [speechPreparing, setSpeechPreparing] = useState(false);
   useEffect(() => {
     messagesRef.current = messages;
+    const hasPendingSpeech = messages.some((item) => {
+      const role = String(item?.role ?? "").toLowerCase();
+      if (role !== "assistant") {
+        return false;
+      }
+      const extras = item?.extrasParsed ?? {};
+      const speech = extras?.speech;
+      if (hasSpeechAudioSource(speech)) {
+        return false;
+      }
+      const statusRaw = extras?.speech_status ?? extras?.speechStatus ?? "";
+      const status =
+        typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
+      return status === "pending" || status === "streaming";
+    });
+    setSpeechPreparing((prev) =>
+      prev === hasPendingSpeech ? prev : hasPendingSpeech,
+    );
   }, [messages]);
-
+  useEffect(() => {
+    speechPreparingRef.current = speechPreparing;
+  }, [speechPreparing]);
   useEffect(() => {
     setCurrentRatingSummary(normalizeRatingSummary(ratingSummary));
   }, [ratingSummary]);
-
   useEffect(() => {
     setIsMounted(true);
     return () => setIsMounted(false);
   }, []);
-
   useEffect(
     () => () => {
       speechRefreshTimersRef.current.forEach((timerId) => {
@@ -458,7 +672,6 @@ export default function ChatPanel({
     error: null,
     success: false,
   });
-
   const router = useRouter();
   const notifyRatingSummaryChange = useCallback(
     (summary) => {
@@ -468,7 +681,6 @@ export default function ChatPanel({
     },
     [onRatingSummaryChange],
   );
-
   const [voiceStatus, setVoiceStatus] = useState({
     loading: false,
     error: null,
@@ -476,6 +688,8 @@ export default function ChatPanel({
     defaultVoice: "",
   });
   const [voiceOptions, setVoiceOptions] = useState([]);
+  const [voiceProviders, setVoiceProviders] = useState([]);
+  const [selectedVoiceProvider, setSelectedVoiceProvider] = useState("");
   const [selectedVoice, setSelectedVoice] = useState("");
   const [speechSpeed, setSpeechSpeed] = useState(1.0);
   const [speechPitch, setSpeechPitch] = useState(1.0);
@@ -483,7 +697,6 @@ export default function ChatPanel({
   const [speechAutoPlay, setSpeechAutoPlay] = useState(true);
   const [speechError, setSpeechError] = useState(null);
   const [activeSpeechId, setActiveSpeechId] = useState(null);
-
   const isPhoneMode = mode === "phone";
   const [phoneCallActive, setPhoneCallActive] = useState(false);
   const [phoneCallError, setPhoneCallError] = useState(null);
@@ -491,18 +704,20 @@ export default function ChatPanel({
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [lastHeardText, setLastHeardText] = useState("");
   const [microphoneActive, setMicrophoneActive] = useState(true);
+  const [microphonePermissionState, setMicrophonePermissionState] =
+    useState("unknown");
+  const microphonePermissionStatusRef = useRef(null);
   const phoneVoiceLoopRef = useRef(false);
   const handleVoiceTranscriptRef = useRef(null);
-
   const hasMorePeerRatings = peerRatings.length < peerRatingsPageInfo.total;
   const isInitialPeerRatingsLoading =
     peerRatingsStatus.loading && peerRatings.length === 0;
-
   const audioContextRef = useRef(null);
   const speechQueueRef = useRef([]);
   const currentSpeechRef = useRef(null);
   const playedSpeechIdsRef = useRef(new Set());
   const speechAutoPlayRef = useRef(true);
+  const speechPreparingRef = useRef(false);
   const messagesRef = useRef([]);
   const speechRefreshTimersRef = useRef(new Map());
   const loadMessagesRef = useRef(() => {});
@@ -510,8 +725,6 @@ export default function ChatPanel({
   const lastEmotionPreviewIdRef = useRef(null);
   const initialMessagesLoadedRef = useRef(false);
   const lastVoiceIdRef = useRef(null);
-  const userSelectedVoiceRef = useRef(false);
-
   const handleUnauthorizedResponse = useCallback(
     (response) => {
       if (response?.status === 401) {
@@ -522,7 +735,6 @@ export default function ChatPanel({
     },
     [router],
   );
-
   const agentAvatar = resolveAssetUrl(
     agent?.avatar_url ?? agent?.avatarUrl ?? "",
   );
@@ -534,7 +746,37 @@ export default function ChatPanel({
     }
     return source.charAt(0).toUpperCase();
   })();
-
+  const userDisplayName = useMemo(() => {
+    const source = userProfile?.displayName;
+    if (typeof source === "string" && source.trim()) {
+      return source.trim();
+    }
+    return "User";
+  }, [userProfile?.displayName]);
+  const userAvatar = useMemo(() => {
+    const source = userProfile?.avatarUrl;
+    if (typeof source === "string" && source.trim()) {
+      return source.trim();
+    }
+    return "";
+  }, [userProfile?.avatarUrl]);
+  const userInitial = useMemo(() => {
+    const base = userDisplayName.trim();
+    if (!base) {
+      return "U";
+    }
+    return base.charAt(0).toUpperCase();
+  }, [userDisplayName]);
+  const formattedTokenBalance = useMemo(() => {
+    if (tokenBalance === null || tokenBalance === undefined) {
+      return null;
+    }
+    const numeric = Number(tokenBalance);
+    if (Number.isFinite(numeric)) {
+      return numeric.toLocaleString();
+    }
+    return String(tokenBalance);
+  }, [tokenBalance]);
   const startRecognition = useCallback(() => {
     const recognition = recognitionRef.current;
     if (!recognition) {
@@ -548,10 +790,18 @@ export default function ChatPanel({
       return true;
     } catch (error) {
       console.warn("Speech recognition start failed", error);
+      const errorName = error?.name;
+      if (
+        errorName === "NotAllowedError" ||
+        errorName === "PermissionDeniedError" ||
+        errorName === "SecurityError"
+      ) {
+        setMicrophonePermissionState("denied");
+        setMicrophoneActive(false);
+      }
       return false;
     }
   }, []);
-
   const stopRecognition = useCallback(() => {
     const recognition = recognitionRef.current;
     if (!recognition) {
@@ -568,7 +818,129 @@ export default function ChatPanel({
       return false;
     }
   }, []);
-
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const navigatorRef = window.navigator;
+    if (!navigatorRef?.permissions?.query) {
+      return undefined;
+    }
+    let cancelled = false;
+    let changeHandler = null;
+    const applyState = (state) => {
+      setMicrophonePermissionState(state);
+      if (state === "denied") {
+        setMicrophoneActive(false);
+        phoneVoiceLoopRef.current = false;
+        setPhoneCallActive(false);
+        setCallStartedAt(null);
+        stopRecognition();
+        if (isPhoneMode) {
+          setPhoneCallError(MICROPHONE_PERMISSION_ERROR);
+        }
+      } else if (state === "granted" && isPhoneMode) {
+        setPhoneCallError((prev) =>
+          prev === MICROPHONE_PERMISSION_ERROR ? null : prev,
+        );
+      }
+    };
+    navigatorRef.permissions
+      .query({ name: "microphone" })
+      .then((status) => {
+        if (cancelled) {
+          return;
+        }
+        microphonePermissionStatusRef.current = status;
+        applyState(status?.state ?? "unknown");
+        changeHandler = () => {
+          applyState(status?.state ?? "unknown");
+        };
+        if (typeof status.addEventListener === "function") {
+          status.addEventListener("change", changeHandler);
+        } else {
+          status.onchange = changeHandler;
+        }
+      })
+      .catch((error) => {
+        console.warn("Microphone permission query failed", error);
+      });
+    return () => {
+      cancelled = true;
+      const status = microphonePermissionStatusRef.current;
+      if (status) {
+        if (changeHandler && typeof status.removeEventListener === "function") {
+          status.removeEventListener("change", changeHandler);
+        } else if (changeHandler && status.onchange === changeHandler) {
+          status.onchange = null;
+        }
+        microphonePermissionStatusRef.current = null;
+      }
+    };
+  }, [
+    isPhoneMode,
+    setCallStartedAt,
+    setMicrophonePermissionState,
+    setPhoneCallActive,
+    setPhoneCallError,
+    setMicrophoneActive,
+    stopRecognition,
+  ]);
+  const ensureMicrophoneAccess = useCallback(async () => {
+    if (typeof window === "undefined") {
+      return { granted: true };
+    }
+    if (microphonePermissionState === "denied") {
+      return { granted: false, reason: "denied" };
+    }
+    if (microphonePermissionState === "granted") {
+      return { granted: true };
+    }
+    const navigatorRef = window.navigator;
+    try {
+      if (navigatorRef?.permissions?.query) {
+        const status = await navigatorRef.permissions.query({
+          name: "microphone",
+        });
+        const state = status?.state ?? "unknown";
+        setMicrophonePermissionState(state);
+        if (state === "granted") {
+          return { granted: true };
+        }
+        if (state === "denied") {
+          setMicrophoneActive(false);
+          return { granted: false, reason: "denied" };
+        }
+      }
+    } catch (error) {
+      console.warn("Microphone permission query failed", error);
+    }
+    if (!navigatorRef?.mediaDevices?.getUserMedia) {
+      return { granted: false, reason: "unsupported" };
+    }
+    try {
+      const stream = await navigatorRef.mediaDevices.getUserMedia({
+        audio: true,
+      });
+      stream.getTracks().forEach((track) => track.stop());
+      setMicrophonePermissionState("granted");
+      return { granted: true };
+    } catch (error) {
+      console.warn("Microphone permission request failed", error);
+      const errorName = error?.name ?? "";
+      const denied =
+        errorName === "NotAllowedError" ||
+        errorName === "PermissionDeniedError" ||
+        errorName === "SecurityError";
+      setMicrophonePermissionState(denied ? "denied" : "unknown");
+      setMicrophoneActive(false);
+      return {
+        granted: false,
+        reason: denied ? "denied" : "failed",
+        error,
+      };
+    }
+  }, [microphonePermissionState]);
   const speechErrorHandler = useCallback(
     (event) => {
       console.warn("Speech recognition error", event?.error);
@@ -582,7 +954,6 @@ export default function ChatPanel({
     },
     [isPhoneMode, startRecognition],
   );
-
   useEffect(() => {
     if (typeof window === "undefined") {
       return undefined;
@@ -591,12 +962,10 @@ export default function ChatPanel({
       window.SpeechRecognition ||
       window.webkitSpeechRecognition ||
       window.mozSpeechRecognition;
-
     if (!RecognitionClass) {
       setVoiceSupported(false);
       return undefined;
     }
-
     const recognition = new RecognitionClass();
     recognition.lang = "zh-CN";
     recognition.interimResults = false;
@@ -630,10 +999,8 @@ export default function ChatPanel({
         setInputValue((prev) => (prev ? `${prev} ${transcript}` : transcript));
       }
     };
-
     recognitionRef.current = recognition;
     setVoiceSupported(true);
-
     return () => {
       recognition.onerror = null;
       recognition.onresult = null;
@@ -648,7 +1015,6 @@ export default function ChatPanel({
       isListeningRef.current = false;
     };
   }, [isPhoneMode, speechErrorHandler, startRecognition]);
-
   useEffect(() => {
     if (typeof window === "undefined") {
       return undefined;
@@ -657,12 +1023,10 @@ export default function ChatPanel({
       window.SpeechRecognition ||
       window.webkitSpeechRecognition ||
       window.mozSpeechRecognition;
-
     if (!RecognitionClass) {
       setVoiceSupported(false);
       return undefined;
     }
-
     const recognition = new RecognitionClass();
     recognition.lang = "zh-CN";
     recognition.interimResults = false;
@@ -677,10 +1041,8 @@ export default function ChatPanel({
         setInputValue((prev) => (prev ? `${prev} ${transcript}` : transcript));
       }
     };
-
     recognitionRef.current = recognition;
     setVoiceSupported(true);
-
     return () => {
       recognition.onerror = null;
       recognition.onresult = null;
@@ -689,7 +1051,6 @@ export default function ChatPanel({
       recognitionRef.current = null;
     };
   }, [speechErrorHandler]);
-
   const applyEmotionToAvatar = useCallback(
     (emotionInput, options = {}) => {
       if (typeof window === "undefined") {
@@ -758,7 +1119,6 @@ export default function ChatPanel({
     },
     [live2DRef],
   );
-
   const stopSpeechPlayback = useCallback(() => {
     const current = currentSpeechRef.current;
     if (typeof window !== "undefined" && ambientEmotionTimeoutRef.current) {
@@ -799,7 +1159,6 @@ export default function ChatPanel({
       controls?.clearEmotion?.();
     }
   }, [applyEmotionToAvatar, live2DRef]);
-
   const ensureAudioContext = useCallback(() => {
     if (typeof window === "undefined") {
       return null;
@@ -826,7 +1185,6 @@ export default function ChatPanel({
     }
     return ctx;
   }, []);
-
   const scheduleNextSpeech = useCallback(() => {
     if (currentSpeechRef.current) {
       return;
@@ -841,15 +1199,45 @@ export default function ChatPanel({
     }
     const normalizedEmotion = normalizeEmotionMeta(next.emotion);
     const speech = next.speech;
-    const source = speech?.audio_base64;
-    if (!source) {
+    const base64Source = getSpeechString(speech, "audio_base64", "audioBase64");
+    const audioUrl = getSpeechString(speech, "audio_url", "audioUrl");
+    let audio = null;
+    if (audioUrl) {
+      let resolvedUrl = audioUrl;
+      try {
+        resolvedUrl = new URL(audioUrl, API_BASE_URL).toString();
+      } catch {
+        // ignore malformed URLs, fall back to original value
+      }
+      const element = new Audio();
+      element.preload = "auto";
+      if (typeof element.crossOrigin === "string") {
+        element.crossOrigin = "use-credentials";
+      }
+      element.src = resolvedUrl;
+      element.load();
+      audio = element;
+    }
+    if (!audio && base64Source) {
+      const mime =
+        getSpeechString(speech, "mime_type", "mimeType", "mime") ||
+        "audio/mpeg";
+      const element = new Audio();
+      element.preload = "auto";
+      element.crossOrigin = "anonymous";
+      element.src = `data:${mime};base64,${base64Source}`;
+      element.load();
+      audio = element;
+    }
+    if (!audio) {
       scheduleNextSpeech();
       return;
     }
-    const mime = speech?.mime_type || "audio/mpeg";
-    const audio = new Audio(`data:${mime};base64,${source}`);
-    audio.preload = "auto";
-    audio.crossOrigin = "anonymous";
+    const fallbackMime =
+      getSpeechString(speech, "mime_type", "mimeType", "mime") || "audio/mpeg";
+    const fallbackSrc = base64Source
+      ? `data:${fallbackMime};base64,${base64Source}`
+      : null;
     const cleanupFns = [];
     const controls = live2DRef?.current;
     const cleanup = () => {
@@ -964,9 +1352,31 @@ export default function ChatPanel({
       });
     };
     const handleError = (event) => {
+      if (fallbackSrc && audio.src !== fallbackSrc) {
+        try {
+          audio.pause();
+        } catch (pauseError) {
+          console.warn("Speech fallback pause failed", pauseError);
+        }
+        if (typeof audio.crossOrigin === "string") {
+          audio.crossOrigin = "anonymous";
+        }
+        audio.src = fallbackSrc;
+        audio.load();
+        const retry = audio.play();
+        if (retry?.catch) {
+          retry.catch((error) => {
+            console.warn("Fallback speech playback failed", error);
+            playedSpeechIdsRef.current.delete(next.id);
+            setSpeechError(SPEECH_PLAYBACK_ERROR_HINT);
+            finishPlayback();
+          });
+        }
+        return;
+      }
       console.warn("Speech playback error", event);
       playedSpeechIdsRef.current.delete(next.id);
-      setSpeechError("语音播放失败，请点击语音按钮重新播放。");
+      setSpeechError(SPEECH_PLAYBACK_ERROR_HINT);
       finishPlayback();
     };
     const handleEnded = () => {
@@ -1003,27 +1413,60 @@ export default function ChatPanel({
         finishPlayback();
       });
     }
-  }, [applyEmotionToAvatar, ensureAudioContext, live2DRef]);
-
+  }, [agentId, userId, applyEmotionToAvatar, ensureAudioContext, live2DRef]);
   const registerSpeech = useCallback(
     (message, options = {}) => {
-      const { enqueue = true, force = false, markPlayed = true } = options;
+      const {
+        enqueue = true,
+        force = false,
+        markPlayed = true,
+        interrupt = false,
+      } = options;
       if (!message) {
         return;
       }
       const extras = message.extrasParsed;
       const speech = extras?.speech;
       const emotion = normalizeEmotionMeta(extras?.emotion);
-      if (!speech?.audio_base64) {
+      if (!hasSpeechAudioSource(speech)) {
         return;
       }
-      const id = message.id ?? message.clientId;
-      if (!id) {
+      const rawId =
+        message.id ??
+        message.ID ??
+        message.clientId ??
+        message.clientID ??
+        null;
+      if (rawId === null || rawId === undefined) {
         return;
       }
+      const id = String(rawId);
       const alreadyPlayed = playedSpeechIdsRef.current.has(id);
       if (!force && alreadyPlayed) {
         return;
+      }
+      if (interrupt) {
+        if (speechQueueRef.current.length > 0) {
+          speechQueueRef.current.length = 0;
+        }
+        const current = currentSpeechRef.current;
+        if (current?.audio) {
+          try {
+            current.audio.pause();
+          } catch (error) {
+            console.warn("Failed to pause current speech", error);
+          }
+        }
+        if (current?.cleanup) {
+          try {
+            current.cleanup();
+          } catch (error) {
+            console.warn("Failed to cleanup interrupted speech", error);
+          }
+        } else if (current) {
+          currentSpeechRef.current = null;
+          setActiveSpeechId(null);
+        }
       }
       if (!force && !speechAutoPlayRef.current) {
         if (markPlayed && !alreadyPlayed) {
@@ -1057,7 +1500,6 @@ export default function ChatPanel({
     },
     [applyEmotionToAvatar, scheduleNextSpeech],
   );
-
   useEffect(
     () => () => {
       stopSpeechPlayback();
@@ -1068,17 +1510,18 @@ export default function ChatPanel({
     },
     [stopSpeechPlayback],
   );
-
   useEffect(() => {
     speechAutoPlayRef.current = speechAutoPlay;
     if (!speechAutoPlay) {
       stopSpeechPlayback();
     }
   }, [speechAutoPlay, stopSpeechPlayback]);
-
   useEffect(() => {
     if (!agentId) {
       setVoiceOptions([]);
+      setVoiceProviders([]);
+      setSelectedVoiceProvider("");
+      setSelectedVoice("");
       setVoiceStatus((prev) => ({
         ...prev,
         enabled: false,
@@ -1100,35 +1543,122 @@ export default function ChatPanel({
           return;
         }
         if (!response.ok) {
-          throw new Error(`请求语音列表失败: ${response.status}`);
+          throw new Error(`语音列表加载失败: ${response.status}`);
         }
         const data = await response.json();
         const voices = Array.isArray(data?.voices) ? data.voices : [];
+        const providers = Array.isArray(data?.providers) ? data.providers : [];
         setVoiceOptions(voices);
+        setVoiceProviders(providers);
+        const normalizedProviders = providers
+          .map((item) => ({
+            id: String(item?.id ?? "").trim(),
+            label: String(item?.label ?? item?.id ?? "").trim(),
+            defaultVoice: String(item?.default_voice ?? "").trim(),
+            enabled: Boolean(item?.enabled),
+          }))
+          .filter((item) => item.id);
+        const defaultProviderFromAPI = String(
+          data?.default_provider ?? "",
+        ).trim();
+        const agentProvider = String(
+          agent?.voice_provider ?? agent?.voiceProvider ?? "",
+        ).trim();
+        const determinePreferredProvider = () => {
+          if (agentProvider) {
+            return agentProvider;
+          }
+          if (defaultProviderFromAPI) {
+            return defaultProviderFromAPI;
+          }
+          const enabledProvider = normalizedProviders.find(
+            (item) => item.enabled,
+          );
+          if (enabledProvider) {
+            return enabledProvider.id;
+          }
+          if (normalizedProviders.length > 0) {
+            return normalizedProviders[0].id;
+          }
+          if (voices.length > 0) {
+            const providerId = String(
+              voices[0]?.provider ?? voices[0]?.Provider ?? "",
+            ).trim();
+            if (providerId) {
+              return providerId;
+            }
+          }
+          return "";
+        };
+        const resolveDefaultVoice = (providerId) => {
+          if (!providerId) {
+            return "";
+          }
+          const normalized = providerId.toLowerCase();
+          const providerEntry = normalizedProviders.find(
+            (item) => item.id.toLowerCase() === normalized,
+          );
+          const preferredVoiceId = String(
+            providerEntry?.defaultVoice ?? "",
+          ).trim();
+          if (preferredVoiceId) {
+            const exists = voices.some(
+              (item) =>
+                String(item?.id ?? "")
+                  .trim()
+                  .toLowerCase() === preferredVoiceId.toLowerCase(),
+            );
+            if (exists) {
+              return preferredVoiceId;
+            }
+          }
+          const match = voices.find((item) => {
+            const providerValue = String(item?.provider ?? item?.Provider ?? "")
+              .trim()
+              .toLowerCase();
+            return providerValue === normalized;
+          });
+          return match ? String(match.id ?? "") : "";
+        };
+        const agentVoiceId = String(
+          agent?.voice_id ?? agent?.voiceId ?? "",
+        ).trim();
+        const voiceEntry = voices.find(
+          (item) => String(item?.id ?? "").trim() === agentVoiceId,
+        );
+        let providerForState = determinePreferredProvider();
+        if (voiceEntry) {
+          const providerId = String(
+            voiceEntry.provider ?? voiceEntry.Provider ?? "",
+          ).trim();
+          if (providerId) {
+            providerForState = providerId;
+          }
+        }
+        const defaultVoice = voiceEntry
+          ? agentVoiceId
+          : resolveDefaultVoice(providerForState);
         setVoiceStatus({
           loading: false,
           error: null,
-          enabled: Boolean(data?.enabled),
-          defaultVoice: data?.default_voice ?? "",
+          enabled: voices.length > 0 && Boolean(data?.enabled),
+          defaultVoice,
         });
-        if (!userSelectedVoiceRef.current) {
-          const preferred =
-            agent?.voice_id ??
-            agent?.voiceId ??
-            data?.default_voice ??
-            (voices.length > 0 ? voices[0].id : "");
-          if (preferred) {
-            setSelectedVoice(String(preferred));
-          }
-        }
+        setSelectedVoiceProvider(providerForState);
+        setSelectedVoice(defaultVoice);
+        setSpeechError(null);
       } catch (error) {
         if (aborted) {
           return;
         }
         console.error(error);
+        setVoiceOptions([]);
+        setVoiceProviders([]);
+        setSelectedVoiceProvider("");
+        setSelectedVoice("");
         setVoiceStatus({
           loading: false,
-          error: error?.message ?? "加载语音列表失败",
+          error: error?.message ?? "语音列表加载失败",
           enabled: false,
           defaultVoice: "",
         });
@@ -1137,8 +1667,63 @@ export default function ChatPanel({
     return () => {
       aborted = true;
     };
-  }, [agentId, agent?.voiceId, agent?.voice_id]);
-
+  }, [
+    agentId,
+    agent?.voiceId,
+    agent?.voice_id,
+    agent?.voice_provider,
+    agent?.voiceProvider,
+  ]);
+  useEffect(() => {
+    const agentVoice = agent?.voice_id ?? agent?.voiceId ?? "";
+    if (agentVoice) {
+      const normalized = String(agentVoice);
+      const exists = voiceOptions.some(
+        (item) =>
+          String(item?.id ?? "").toLowerCase() === normalized.toLowerCase(),
+      );
+      if (exists) {
+        setSelectedVoice((prev) => {
+          if (prev === normalized) {
+            return prev;
+          }
+          setSpeechError(null);
+          return normalized;
+        });
+        return;
+      }
+    }
+    if (voiceStatus.defaultVoice) {
+      const normalizedDefault = String(voiceStatus.defaultVoice);
+      const exists = voiceOptions.some(
+        (item) =>
+          String(item?.id ?? "").toLowerCase() ===
+          normalizedDefault.toLowerCase(),
+      );
+      if (exists) {
+        setSelectedVoice((prev) => {
+          if (prev) {
+            return prev;
+          }
+          setSpeechError(null);
+          return normalizedDefault;
+        });
+        return;
+      }
+    }
+    if (voiceOptions.length > 0) {
+      const fallback = String(voiceOptions[0]?.id ?? "");
+      if (fallback) {
+        setSelectedVoice((prev) => {
+          if (prev) {
+            return prev;
+          }
+          setSpeechError(null);
+          return fallback;
+        });
+      }
+    }
+  }, [agent?.voice_id, agent?.voiceId, voiceStatus.defaultVoice, voiceOptions]);
   const selectedVoiceOption = useMemo(() => {
     if (!selectedVoice) {
       return null;
@@ -1149,7 +1734,52 @@ export default function ChatPanel({
       null
     );
   }, [selectedVoice, voiceOptions]);
-
+  useEffect(() => {
+    if (!selectedVoice) {
+      return;
+    }
+    const voiceEntry = voiceOptions.find(
+      (item) =>
+        String(item?.id ?? "")
+          .trim()
+          .toLowerCase() === String(selectedVoice).trim().toLowerCase(),
+    );
+    if (!voiceEntry) {
+      return;
+    }
+    const providerValue = String(
+      voiceEntry?.provider ?? voiceEntry?.Provider ?? "",
+    ).trim();
+    if (providerValue && providerValue !== selectedVoiceProvider) {
+      setSelectedVoiceProvider(providerValue);
+    }
+  }, [selectedVoice, selectedVoiceProvider, voiceOptions]);
+  const selectedVoiceLabel = useMemo(() => {
+    if (selectedVoiceOption) {
+      return (
+        selectedVoiceOption.display_name ??
+        selectedVoiceOption.displayName ??
+        selectedVoiceOption.name ??
+        selectedVoiceOption.nickname ??
+        String(selectedVoiceOption.id ?? "")
+      );
+    }
+    if (voiceStatus.loading) {
+      return "音色加载中...";
+    }
+    if (selectedVoice) {
+      return selectedVoice;
+    }
+    if (voiceStatus.defaultVoice) {
+      return "系统默认";
+    }
+    return "未绑定";
+  }, [
+    selectedVoiceOption,
+    voiceStatus.loading,
+    voiceStatus.defaultVoice,
+    selectedVoice,
+  ]);
   useEffect(() => {
     if (!selectedVoiceOption) {
       return;
@@ -1178,7 +1808,6 @@ export default function ChatPanel({
       setEmotionHint("");
     }
   }, [selectedVoiceOption, emotionHint, speechPitch, speechSpeed]);
-
   const loadProfile = useCallback(async () => {
     if (!agentId) {
       return;
@@ -1190,12 +1819,10 @@ export default function ChatPanel({
         headers: deriveHeaders(),
         credentials: "include",
       });
-
       if (handleUnauthorizedResponse(response)) {
         setProfileStatus({ loading: false, error: null });
         return;
       }
-
       if (!response.ok) {
         throw new Error(`Profile request failed with ${response.status}`);
       }
@@ -1204,38 +1831,77 @@ export default function ChatPanel({
         data && typeof data === "object" ? (data.user ?? data) : null;
       const identifier =
         user?.id ?? user?.ID ?? user?.user_id ?? user?.userId ?? null;
-
       if (typeof identifier !== "number" && typeof identifier !== "string") {
         throw new Error("Profile response missing id");
       }
-
+      const displayNameCandidate =
+        user?.display_name ??
+        user?.displayName ??
+        user?.nickname ??
+        user?.username ??
+        "";
+      const normalizedDisplayName =
+        typeof displayNameCandidate === "string" && displayNameCandidate.trim()
+          ? displayNameCandidate.trim()
+          : "User";
+      const avatarCandidate = user?.avatar_url ?? user?.avatarUrl ?? "";
+      const resolvedAvatar =
+        typeof avatarCandidate === "string" && avatarCandidate.trim()
+          ? resolveAssetUrl(avatarCandidate)
+          : "";
+      setUserProfile({
+        displayName: normalizedDisplayName,
+        avatarUrl: resolvedAvatar,
+      });
+      const balance = normalizeTokenValue(
+        user?.token_balance ?? user?.tokenBalance,
+      );
+      if (balance !== null) {
+        setTokenBalance(balance);
+        setInsufficientTokens(balance <= 0);
+        if (balance > 0) {
+          setSendError((prev) => {
+            if (!prev) {
+              return prev;
+            }
+            const lower = String(prev).toLowerCase();
+            return lower.includes("token") ? null : prev;
+          });
+        }
+      } else {
+        setTokenBalance(null);
+        setInsufficientTokens(false);
+      }
       setUserId(String(identifier));
       setProfileStatus({ loading: false, error: null });
     } catch (error) {
       console.error(error);
+      setUserProfile({ displayName: "", avatarUrl: "" });
+      setTokenBalance(null);
+      setInsufficientTokens(false);
       setProfileStatus({
         loading: false,
         error: error?.message ?? "Failed to load profile",
       });
     }
   }, [agentId, handleUnauthorizedResponse]);
-
   const fetchAgentRatings = useCallback(
     async ({ page = 1, append = false, signal } = {}) => {
       if (!agentId) {
         return;
       }
-
       const shouldUpdateRatingStatus = !append;
       if (shouldUpdateRatingStatus) {
         setRatingStatus({ loading: true, error: null });
       }
       setPeerRatingsStatus({ loading: true, error: null, appending: append });
-
       try {
         const currentPageSize = Math.min(
           MAX_REVIEWS_PAGE_SIZE,
-          Math.max(1, peerRatingsPageSizeRef.current || DEFAULT_REVIEWS_PAGE_SIZE),
+          Math.max(
+            1,
+            peerRatingsPageSizeRef.current || DEFAULT_REVIEWS_PAGE_SIZE,
+          ),
         );
         const requestedPage = Math.max(1, Number(page) || 1);
         const url = new URL(`/agents/${agentId}/ratings`, API_BASE_URL);
@@ -1244,35 +1910,33 @@ export default function ChatPanel({
         if (userId) {
           url.searchParams.set("user_id", String(userId));
         }
-
         const response = await fetch(url.toString(), {
           method: "GET",
           headers: deriveHeaders(),
           credentials: "include",
           signal,
         });
-
         if (handleUnauthorizedResponse(response)) {
           if (shouldUpdateRatingStatus) {
             setRatingStatus({ loading: false, error: null });
           }
-          setPeerRatingsStatus({ loading: false, error: null, appending: false });
+          setPeerRatingsStatus({
+            loading: false,
+            error: null,
+            appending: false,
+          });
           if (!append) {
             setPeerRatingsFetched(false);
           }
           return;
         }
-
         if (!response.ok) {
           throw new Error(`Rating fetch failed with ${response.status}`);
         }
-
         const data = await response.json();
-
         const summaryNormalized = normalizeRatingSummary(data?.summary);
         setCurrentRatingSummary(summaryNormalized);
         notifyRatingSummaryChange(summaryNormalized);
-
         const normalizedUserRating = normalizeUserRating(data?.user_rating);
         setUserRating(normalizedUserRating);
         if (normalizedUserRating) {
@@ -1283,18 +1947,21 @@ export default function ChatPanel({
         } else if (!append) {
           setRatingDraft((previous) => ({ ...previous, comment: "" }));
         }
-
         const normalizedList = Array.isArray(data?.ratings)
           ? data.ratings
               .map((item) => normalizePeerRating(item))
               .filter((item) => item != null)
           : [];
-
         const userIdString =
-          typeof userId === "string" ? userId : userId != null ? String(userId) : null;
-
+          typeof userId === "string"
+            ? userId
+            : userId != null
+              ? String(userId)
+              : null;
         setPeerRatings((previous) => {
-          const base = append ? [...previous, ...normalizedList] : normalizedList;
+          const base = append
+            ? [...previous, ...normalizedList]
+            : normalizedList;
           const seen = new Set();
           const deduped = [];
           for (const item of base) {
@@ -1302,7 +1969,8 @@ export default function ChatPanel({
               continue;
             }
             const key =
-              item.id ?? `${item.userId ?? "?"}-${item.updatedAt ?? item.createdAt ?? "?"}`;
+              item.id ??
+              `${item.userId ?? "?"}-${item.updatedAt ?? item.createdAt ?? "?"}`;
             if (seen.has(key)) {
               continue;
             }
@@ -1311,23 +1979,25 @@ export default function ChatPanel({
           }
           return deduped;
         });
-
         const totalCountRaw =
-          data?.pagination?.total ?? data?.total_count ?? summaryNormalized.rating_count ?? 0;
+          data?.pagination?.total ??
+          data?.total_count ??
+          summaryNormalized.rating_count ??
+          0;
         const pageSizeRaw =
           data?.pagination?.page_size ?? data?.page_size ?? currentPageSize;
         const pageRaw = data?.pagination?.page ?? requestedPage;
-
         const normalizedPageSize = (() => {
           const value = Number(pageSizeRaw);
           if (!Number.isFinite(value) || value <= 0) {
             return currentPageSize;
           }
-          return Math.min(MAX_REVIEWS_PAGE_SIZE, Math.max(1, Math.floor(value)));
+          return Math.min(
+            MAX_REVIEWS_PAGE_SIZE,
+            Math.max(1, Math.floor(value)),
+          );
         })();
-
         peerRatingsPageSizeRef.current = normalizedPageSize;
-
         const normalizedPage = (() => {
           const value = Number(pageRaw);
           if (!Number.isFinite(value) || value <= 0) {
@@ -1335,7 +2005,6 @@ export default function ChatPanel({
           }
           return Math.floor(value);
         })();
-
         const normalizedTotal = (() => {
           const value = Number(totalCountRaw);
           if (!Number.isFinite(value) || value <= 0) {
@@ -1343,17 +2012,14 @@ export default function ChatPanel({
           }
           return Math.floor(value);
         })();
-
         setPeerRatingsPageInfo({
           page: normalizedPage,
           pageSize: normalizedPageSize,
           total: normalizedTotal,
         });
-
         if (!append) {
           setPeerRatingsFetched(true);
         }
-
         if (shouldUpdateRatingStatus) {
           setRatingStatus({ loading: false, error: null });
         }
@@ -1381,7 +2047,6 @@ export default function ChatPanel({
     },
     [agentId, userId, handleUnauthorizedResponse, notifyRatingSummaryChange],
   );
-
   useEffect(() => {
     if (!agentId) {
       setPeerRatings([]);
@@ -1393,16 +2058,13 @@ export default function ChatPanel({
       setPeerRatingsFetched(false);
       return;
     }
-
     setPeerRatingsFetched(false);
     const controller = new AbortController();
     fetchAgentRatings({ page: 1, append: false, signal: controller.signal });
-
     return () => {
       controller.abort();
     };
   }, [agentId, userId, fetchAgentRatings]);
-
   useEffect(() => {
     if (!reviewsModalOpen) {
       return;
@@ -1421,7 +2083,6 @@ export default function ChatPanel({
     peerRatingsStatus.error,
     fetchAgentRatings,
   ]);
-
   const handleOpenRatingModal = useCallback(() => {
     if (ratingStatus.loading) {
       return;
@@ -1441,7 +2102,6 @@ export default function ChatPanel({
     setRatingSubmitStatus({ loading: false, error: null, success: false });
     setRatingModalOpen(true);
   }, [ratingStatus.loading, userRating]);
-
   const handleCloseRatingModal = useCallback(() => {
     if (ratingSubmitStatus.loading) {
       return;
@@ -1449,15 +2109,12 @@ export default function ChatPanel({
     setRatingModalOpen(false);
     setRatingSubmitStatus({ loading: false, error: null, success: false });
   }, [ratingSubmitStatus.loading]);
-
   const handleOpenReviewsModal = useCallback(() => {
     setReviewsModalOpen(true);
   }, []);
-
   const handleCloseReviewsModal = useCallback(() => {
     setReviewsModalOpen(false);
   }, []);
-
   const handleRefreshPeerRatings = useCallback(() => {
     if (peerRatingsStatus.loading && !peerRatingsStatus.appending) {
       return;
@@ -1469,7 +2126,6 @@ export default function ChatPanel({
     peerRatingsStatus.loading,
     peerRatingsStatus.appending,
   ]);
-
   const handleLoadMorePeerRatings = useCallback(() => {
     if (peerRatingsStatus.loading) {
       return;
@@ -1479,20 +2135,23 @@ export default function ChatPanel({
     }
     const nextPage = peerRatingsPageInfo.page + 1;
     fetchAgentRatings({ page: nextPage, append: true });
-  }, [fetchAgentRatings, peerRatingsStatus.loading, peerRatings.length, peerRatingsPageInfo.page, peerRatingsPageInfo.total]);
-
+  }, [
+    fetchAgentRatings,
+    peerRatingsStatus.loading,
+    peerRatings.length,
+    peerRatingsPageInfo.page,
+    peerRatingsPageInfo.total,
+  ]);
   const handleRatingScoreChange = useCallback((value) => {
     const normalized = Math.max(1, Math.min(5, Number(value) || 5));
     setRatingDraft((previous) => ({ ...previous, score: normalized }));
   }, []);
-
   const handleRatingCommentChange = useCallback((event) => {
     setRatingDraft((previous) => ({
       ...previous,
       comment: event?.target?.value ?? "",
     }));
   }, []);
-
   const handleSubmitRating = useCallback(async () => {
     if (!agentId || !userId) {
       setRatingSubmitStatus({
@@ -1504,7 +2163,6 @@ export default function ChatPanel({
     }
     const score = Math.max(1, Math.min(5, Number(ratingDraft.score) || 5));
     const comment = (ratingDraft.comment ?? "").trim();
-
     setRatingSubmitStatus({ loading: true, error: null, success: false });
     try {
       const response = await fetch(
@@ -1520,7 +2178,6 @@ export default function ChatPanel({
           }),
         },
       );
-
       if (handleUnauthorizedResponse(response)) {
         setRatingSubmitStatus({
           loading: false,
@@ -1529,17 +2186,14 @@ export default function ChatPanel({
         });
         return;
       }
-
       if (!response.ok) {
         throw new Error(`Rating update failed with ${response.status}`);
       }
-
       const data = await response.json();
       const summaryNormalized = normalizeRatingSummary(data?.summary);
       setCurrentRatingSummary(summaryNormalized);
       notifyRatingSummaryChange(summaryNormalized);
       setRatingStatus({ loading: false, error: null });
-
       const normalizedUserRating = normalizeUserRating(data?.rating);
       if (normalizedUserRating) {
         setUserRating(normalizedUserRating);
@@ -1552,7 +2206,6 @@ export default function ChatPanel({
         setUserRating(fallbackRating);
         setRatingDraft(fallbackRating);
       }
-
       setRatingSubmitStatus({ loading: false, error: null, success: true });
       setRatingModalOpen(false);
     } catch (error) {
@@ -1571,7 +2224,6 @@ export default function ChatPanel({
     notifyRatingSummaryChange,
     handleUnauthorizedResponse,
   ]);
-
   useEffect(() => {
     if (typeof onRatingControllerChange !== "function") {
       ratingControllerRef.current = null;
@@ -1597,8 +2249,12 @@ export default function ChatPanel({
       ratingControllerRef.current = null;
       onRatingControllerChange(null);
     };
-  }, [handleOpenRatingModal, handleOpenReviewsModal, handleRefreshPeerRatings, onRatingControllerChange]);
-
+  }, [
+    handleOpenRatingModal,
+    handleOpenReviewsModal,
+    handleRefreshPeerRatings,
+    onRatingControllerChange,
+  ]);
   const initializeConversation = useCallback(async () => {
     if (!agentId || !userId) {
       return;
@@ -1614,12 +2270,10 @@ export default function ChatPanel({
           body: JSON.stringify({ user_id: Number(userId) }),
         },
       );
-
       if (handleUnauthorizedResponse(response)) {
         setConversationStatus({ loading: false, error: null });
         return;
       }
-
       if (!response.ok) {
         throw new Error(`Conversation init failed with ${response.status}`);
       }
@@ -1649,7 +2303,38 @@ export default function ChatPanel({
       });
     }
   }, [agentId, userId, handleUnauthorizedResponse, registerSpeech]);
-
+  const fetchSpeechStatus = useCallback(
+    async (messageId) => {
+      if (!agentId || !userId || !messageId) {
+        return null;
+      }
+      try {
+        const url = new URL(`${API_BASE_URL}/llm/messages/${messageId}/speech`);
+        url.searchParams.set("agent_id", agentId);
+        url.searchParams.set("user_id", userId);
+        const response = await fetch(url.toString(), {
+          method: "GET",
+          headers: deriveHeaders(),
+          credentials: "include",
+        });
+        if (handleUnauthorizedResponse(response)) {
+          return null;
+        }
+        if (response.status === 404) {
+          return { status: "missing" };
+        }
+        if (!response.ok) {
+          throw new Error(`Speech status request failed: ${response.status}`);
+        }
+        const data = await response.json();
+        return data;
+      } catch (error) {
+        console.warn("Failed to fetch speech status", error);
+        return null;
+      }
+    },
+    [agentId, userId, handleUnauthorizedResponse],
+  );
   const scheduleSpeechRefresh = useCallback(
     (messageId, attempt = 0) => {
       if (!messageId || attempt > 5) {
@@ -1659,33 +2344,75 @@ export default function ChatPanel({
       if (speechRefreshTimersRef.current.has(key)) {
         window.clearTimeout(speechRefreshTimersRef.current.get(key));
       }
-      const delay = Math.min(8000, 1500 * (attempt + 1));
+      const delay = Math.min(6000, 1000 * (attempt + 1));
       const timerId = window.setTimeout(async () => {
         speechRefreshTimersRef.current.delete(key);
-        await loadMessagesRef.current();
-        const target = messagesRef.current.find(
+        const statusResponse = await fetchSpeechStatus(messageId);
+        if (!statusResponse) {
+          scheduleSpeechRefresh(messageId, attempt + 1);
+          return;
+        }
+        const statusRaw =
+          statusResponse.speech_status ??
+          statusResponse.speechStatus ??
+          statusResponse.status ??
+          "";
+        const status =
+          typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
+        const speechPayload = statusResponse.speech ?? null;
+        const speechErrorMessage =
+          statusResponse.speech_error ?? statusResponse.speechError ?? "";
+        let target = messagesRef.current.find(
           (item) => String(item?.id ?? item?.ID ?? "") === key,
         );
-        const extras = target?.extrasParsed ?? null;
-        const speech = extras?.speech;
-        const status = extras?.speech_status ?? extras?.speechStatus ?? "";
-        if (speech && speech.audio_base64) {
+        if (!target) {
+          await loadMessagesRef.current();
+          target = messagesRef.current.find(
+            (item) => String(item?.id ?? item?.ID ?? "") === key,
+          );
+        }
+        if (target) {
+          const mergedExtras = { ...(target.extrasParsed ?? {}) };
+          if (status) {
+            mergedExtras.speech_status = status;
+          }
+          if (speechPayload) {
+            mergedExtras.speech = speechPayload;
+          }
+          if (speechErrorMessage) {
+            mergedExtras.speech_error = speechErrorMessage;
+          } else if (mergedExtras.speech_error) {
+            delete mergedExtras.speech_error;
+          }
+          const updatedTarget = { ...target, extrasParsed: mergedExtras };
+          setMessages((prev) =>
+            prev.map((item) =>
+              String(item?.id ?? item?.ID ?? "") === key ? updatedTarget : item,
+            ),
+          );
+          target = updatedTarget;
+        }
+        if (speechPayload && hasSpeechAudioSource(speechPayload) && target) {
           registerSpeech(target, {
             enqueue: true,
             force: true,
             markPlayed: false,
+            interrupt: true,
           });
           return;
         }
-        if (status === "pending") {
+        if (status === "pending" || status === "streaming") {
           scheduleSpeechRefresh(messageId, attempt + 1);
+          return;
+        }
+        if (status === "error" && speechErrorMessage) {
+          setSpeechError(speechErrorMessage);
         }
       }, delay);
       speechRefreshTimersRef.current.set(key, timerId);
     },
-    [registerSpeech],
+    [fetchSpeechStatus, registerSpeech],
   );
-
   const handleAssistantFinal = useCallback(
     (assistantMessage) => {
       if (!assistantMessage) {
@@ -1694,11 +2421,11 @@ export default function ChatPanel({
       const extras = assistantMessage.extrasParsed ?? null;
       const speech = extras?.speech;
       const status = extras?.speech_status ?? extras?.speechStatus ?? "";
-      if (speech && speech.audio_base64) {
-        registerSpeech(assistantMessage);
+      if (speech && hasSpeechAudioSource(speech)) {
+        registerSpeech(assistantMessage, { interrupt: true });
         return;
       }
-      if (status === "pending") {
+      if (status === "pending" || status === "streaming") {
         const messageId = assistantMessage.id ?? assistantMessage.ID ?? null;
         if (messageId != null) {
           scheduleSpeechRefresh(messageId, 0);
@@ -1707,7 +2434,6 @@ export default function ChatPanel({
     },
     [registerSpeech, scheduleSpeechRefresh],
   );
-
   const loadMessages = useCallback(async () => {
     if (!agentId || !userId) {
       return;
@@ -1717,22 +2443,18 @@ export default function ChatPanel({
       const url = new URL(`${API_BASE_URL}/llm/messages`);
       url.searchParams.set("agent_id", agentId);
       url.searchParams.set("user_id", userId);
-
       const response = await fetch(url, {
         method: "GET",
         headers: deriveHeaders(),
         credentials: "include",
       });
-
       if (handleUnauthorizedResponse(response)) {
         setMessagesStatus({ loading: false, error: null });
         return;
       }
-
       if (!response.ok) {
         throw new Error(`Messages request failed with ${response.status}`);
       }
-
       const data = await response.json();
       const items = Array.isArray(data)
         ? data
@@ -1753,7 +2475,7 @@ export default function ChatPanel({
         initialMessagesLoadedRef.current = true;
       } else {
         normalized.forEach((item) => {
-          registerSpeech(item, { enqueue: true });
+          registerSpeech(item, { enqueue: true, interrupt: true });
           if ((item.role ?? item.Role ?? "assistant") === "assistant") {
             handleAssistantFinal(item);
           }
@@ -1774,7 +2496,6 @@ export default function ChatPanel({
     registerSpeech,
     handleAssistantFinal,
   ]);
-
   const handleClearConversation = useCallback(async () => {
     if (!agentId || !userId) {
       setClearStatus({
@@ -1784,7 +2505,6 @@ export default function ChatPanel({
       });
       return;
     }
-
     const numericUserId = Number(userId);
     if (Number.isNaN(numericUserId)) {
       setClearStatus({
@@ -1794,7 +2514,6 @@ export default function ChatPanel({
       });
       return;
     }
-
     setClearStatus({ loading: true, error: null, success: false });
     try {
       const response = await fetch(
@@ -1806,16 +2525,13 @@ export default function ChatPanel({
           body: JSON.stringify({ user_id: numericUserId }),
         },
       );
-
       if (handleUnauthorizedResponse(response)) {
         setClearStatus({ loading: false, error: null, success: false });
         return;
       }
-
       if (!response.ok && response.status !== 204) {
         throw new Error(`Clear conversation failed with ${response.status}`);
       }
-
       setMessages([]);
       setConversationId(null);
       setInputValue("");
@@ -1824,10 +2540,8 @@ export default function ChatPanel({
       speechQueueRef.current = [];
       stopSpeechPlayback();
       initialMessagesLoadedRef.current = false;
-
       await initializeConversation();
       await loadMessagesRef.current();
-
       setClearStatus({ loading: false, error: null, success: true });
     } catch (error) {
       console.error(error);
@@ -1844,13 +2558,11 @@ export default function ChatPanel({
     handleUnauthorizedResponse,
     stopSpeechPlayback,
   ]);
-
   useEffect(() => {
     (async () => {
       await loadProfile();
     })();
   }, [loadProfile]);
-
   useEffect(() => {
     setMessages([]);
     setConversationId(null);
@@ -1861,11 +2573,9 @@ export default function ChatPanel({
     initialMessagesLoadedRef.current = false;
     setSpeechError(null);
     lastVoiceIdRef.current = null;
-    userSelectedVoiceRef.current = false;
     setSelectedVoice("");
     setEmotionHint("");
   }, [agentId, stopSpeechPlayback]);
-
   useEffect(() => {
     if (!agentId || !userId) {
       return;
@@ -1875,12 +2585,15 @@ export default function ChatPanel({
       await loadMessagesRef.current();
     })();
   }, [agentId, userId, initializeConversation, loadMessages]);
-
   const sendChatMessage = useCallback(
     async (rawContent) => {
       const trimmed = typeof rawContent === "string" ? rawContent.trim() : "";
       if (!trimmed) {
         return { success: false, trimmed };
+      }
+      if (insufficientTokens) {
+        setSendError("Token余额不足，请购买后继续聊天。");
+        return { success: false, trimmed, error: "insufficient_tokens" };
       }
       if (!agentId || !userId) {
         const errorMessage =
@@ -1888,9 +2601,13 @@ export default function ChatPanel({
         setSendError(errorMessage);
         return { success: false, trimmed, error: errorMessage };
       }
+      if (speechPreparingRef.current) {
+        const errorMessage = "语音加载中，请稍候再发送下一条消息。";
+        setSendError(errorMessage);
+        return { success: false, trimmed, error: errorMessage };
+      }
       setIsSending(true);
       setSendError(null);
-
       const optimisticMessage = {
         id: `temp-${Date.now()}`,
         clientId: `temp-${Date.now()}-${Math.random()}`,
@@ -1902,7 +2619,6 @@ export default function ChatPanel({
       };
       const optimisticKey = getMessageKey(optimisticMessage);
       setMessages((prev) => [...prev, optimisticMessage]);
-
       const targetVoice = selectedVoice || voiceStatus.defaultVoice || "";
       const settings = selectedVoiceOption?.settings ?? {};
       const speedRange = settings.speed_range ??
@@ -1917,6 +2633,12 @@ export default function ChatPanel({
       };
       if (targetVoice) {
         payload.voice_id = targetVoice;
+        const providerValue = String(
+          selectedVoiceOption?.provider ?? selectedVoiceOption?.Provider ?? "",
+        ).trim();
+        if (providerValue) {
+          payload.voice_provider = providerValue;
+        }
       }
       const minSpeed = Number(speedRange?.[0] ?? 0.5);
       const maxSpeed = Number(speedRange?.[1] ?? 1.6);
@@ -1929,18 +2651,15 @@ export default function ChatPanel({
       if (emotionHint) {
         payload.emotion_hint = emotionHint;
       }
-
       const headers = deriveHeaders({
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       });
-
       const cleanOptimistic = () => {
         setMessages((prev) =>
           prev.filter((item) => getMessageKey(item) !== optimisticKey),
         );
       };
-
       try {
         const response = await fetch(`${API_BASE_URL}/llm/messages`, {
           method: "POST",
@@ -1948,29 +2667,43 @@ export default function ChatPanel({
           credentials: "include",
           body: JSON.stringify(payload),
         });
-
         if (handleUnauthorizedResponse(response)) {
           cleanOptimistic();
           return { success: false, trimmed, error: "unauthorized" };
         }
-
         const contentType = (
           response.headers.get("Content-Type") ?? ""
         ).toLowerCase();
-
         if (!response.ok) {
+          if (response.status === 402) {
+            cleanOptimistic();
+            const errorData = await response.json().catch(() => null);
+            const balance = normalizeTokenValue(
+              errorData?.token_balance ?? errorData?.tokenBalance,
+            );
+            if (balance !== null) {
+              setTokenBalance(balance);
+              setInsufficientTokens(balance <= 0);
+            } else {
+              setTokenBalance(0);
+              setInsufficientTokens(true);
+            }
+            const message =
+              errorData?.error ??
+              errorData?.message ??
+              "Token余额不足，请购买后继续聊天。";
+            setSendError(message);
+            return { success: false, trimmed, error: "insufficient_tokens" };
+          }
           throw new Error(`Send failed with status ${response.status}`);
         }
-
         let lastAssistant = null;
-
         const ensureConversationId = (value) => {
           if (!value) {
             return;
           }
           setConversationId(String(value));
         };
-
         const upsertAssistantMessage = (record, { markFinal } = {}) => {
           const normalized = normalizeMessage(record);
           if (!normalized) {
@@ -2001,7 +2734,6 @@ export default function ChatPanel({
             handleAssistantFinal(normalized);
           }
         };
-
         const applyAssistantDelta = (messageId, content) => {
           if (!messageId) {
             return;
@@ -2015,7 +2747,6 @@ export default function ChatPanel({
             }),
           );
         };
-
         const replaceUserMessage = (record) => {
           const normalized = normalizeMessage(record);
           if (!normalized) {
@@ -2043,14 +2774,12 @@ export default function ChatPanel({
             return updated;
           });
         };
-
         const handleStreamEvent = (eventName, payload) => {
           if (payload && typeof payload === "object") {
             ensureConversationId(
               payload.conversation_id ?? payload.ConversationID ?? null,
             );
           }
-
           switch (eventName) {
             case "user_message": {
               replaceUserMessage(payload ?? optimisticMessage);
@@ -2073,6 +2802,131 @@ export default function ChatPanel({
               upsertAssistantMessage(payload, { markFinal: true });
               break;
             }
+            case "token_update": {
+              const balance = normalizeTokenValue(
+                payload?.token_balance ?? payload?.tokenBalance,
+              );
+              if (balance !== null) {
+                setTokenBalance(balance);
+                setInsufficientTokens(balance <= 0);
+                if (balance > 0) {
+                  setSendError((prev) => {
+                    if (!prev) {
+                      return prev;
+                    }
+                    const lower = String(prev).toLowerCase();
+                    return lower.includes("token") ? null : prev;
+                  });
+                } else {
+                  setSendError((prev) => {
+                    if (prev && String(prev).toLowerCase().includes("token")) {
+                      return prev;
+                    }
+                    return "Token余额不足，请购买后继续聊天。";
+                  });
+                }
+              }
+              break;
+            }
+            case "speech_stream_started": {
+              const messageId = payload?.id ?? payload?.ID ?? null;
+              if (messageId !== null && messageId !== undefined) {
+                patchMessageSpeechExtras(messageId, (extras) => {
+                  extras.speech_status = "streaming";
+                });
+              }
+              break;
+            }
+            case "speech_stream_completed": {
+              const messageId = payload?.id ?? payload?.ID ?? null;
+              if (messageId !== null && messageId !== undefined) {
+                const audioBase64 =
+                  (typeof payload?.audio_base64 === "string" &&
+                    payload.audio_base64.trim()) ||
+                  (typeof payload?.audioBase64 === "string" &&
+                    payload.audioBase64.trim()) ||
+                  "";
+                const audioUrl =
+                  (typeof payload?.audio_url === "string" &&
+                    payload.audio_url.trim()) ||
+                  (typeof payload?.audioUrl === "string" &&
+                    payload.audioUrl.trim()) ||
+                  "";
+                const mimeType =
+                  (typeof payload?.mime_type === "string" &&
+                    payload.mime_type.trim()) ||
+                  (typeof payload?.mimeType === "string" &&
+                    payload.mimeType.trim()) ||
+                  "";
+                const speechPayload = {};
+                if (audioBase64) {
+                  speechPayload.audio_base64 = audioBase64;
+                }
+                if (audioUrl) {
+                  speechPayload.audio_url = audioUrl;
+                }
+                if (mimeType) {
+                  speechPayload.mime_type = mimeType;
+                }
+                if (payload?.voice_id) {
+                  speechPayload.voice_id = payload.voice_id;
+                }
+                if (payload?.provider) {
+                  speechPayload.provider = payload.provider;
+                }
+                patchMessageSpeechExtras(messageId, (extras) => {
+                  const speech = { ...(extras.speech ?? {}), ...speechPayload };
+                  extras.speech = speech;
+                  extras.speech_status = "ready";
+                  if (payload?.error) {
+                    extras.speech_error = payload.error;
+                  } else if (extras.speech_error) {
+                    delete extras.speech_error;
+                  }
+                });
+                const currentMessage = messagesRef.current.find(
+                  (item) =>
+                    String(item?.id ?? item?.ID ?? item?.clientId ?? "") ===
+                    String(messageId),
+                );
+                if (currentMessage) {
+                  const mergedExtras = {
+                    ...(currentMessage.extrasParsed ?? {}),
+                    speech: {
+                      ...((currentMessage.extrasParsed ?? {}).speech ?? {}),
+                      ...speechPayload,
+                    },
+                    speech_status: "ready",
+                  };
+                  if (payload?.error) {
+                    mergedExtras.speech_error = payload.error;
+                  } else if (mergedExtras.speech_error) {
+                    delete mergedExtras.speech_error;
+                  }
+                  registerSpeech(
+                    { ...currentMessage, extrasParsed: mergedExtras },
+                    { enqueue: true, interrupt: false },
+                  );
+                }
+              }
+              break;
+            }
+            case "speech_stream_failed": {
+              const messageId = payload?.id ?? payload?.ID ?? null;
+              if (messageId !== null && messageId !== undefined) {
+                patchMessageSpeechExtras(messageId, (extras) => {
+                  extras.speech_status = "error";
+                  const errorMessage =
+                    (typeof payload?.error === "string" &&
+                      payload.error.trim()) ||
+                    "";
+                  if (errorMessage) {
+                    extras.speech_error = errorMessage;
+                  }
+                });
+              }
+              break;
+            }
             case "error": {
               const message =
                 typeof payload?.error === "string" && payload.error
@@ -2085,7 +2939,6 @@ export default function ChatPanel({
               break;
           }
         };
-
         if (contentType.includes("text/event-stream") && response.body) {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
@@ -2097,7 +2950,7 @@ export default function ChatPanel({
                 break;
               }
               buffer += decoder.decode(value, { stream: true });
-              buffer = buffer.replace(/\r\n/g, "\n");
+              buffer = buffer.replace(/\r/g, "");
               let boundary = buffer.indexOf("\n\n");
               while (boundary !== -1) {
                 const rawEvent = buffer.slice(0, boundary);
@@ -2129,7 +2982,7 @@ export default function ChatPanel({
                 handleStreamEvent(eventName, parsed);
               }
             }
-            buffer = buffer.replace(/\r\n/g, "\n");
+            buffer = buffer.replace(/\r/g, "");
             if (buffer.trim()) {
               const lines = buffer.trim().split("\n");
               let eventName = "message";
@@ -2155,21 +3008,33 @@ export default function ChatPanel({
           } finally {
             reader.releaseLock();
           }
-
           cleanOptimistic();
           return { success: true, trimmed, assistant: lastAssistant };
         }
-
         const data = await response.json().catch(() => null);
         if (data?.conversation_id) {
           setConversationId(String(data.conversation_id));
         }
-
         const normalizedUser =
           normalizeMessage(data?.user_message) ??
           normalizeMessage(optimisticMessage);
         const normalizedAssistant = normalizeMessage(data?.assistant_message);
-
+        const balance = normalizeTokenValue(
+          data?.token_balance ?? data?.tokenBalance,
+        );
+        if (balance !== null) {
+          setTokenBalance(balance);
+          setInsufficientTokens(balance <= 0);
+          if (balance > 0) {
+            setSendError((prev) => {
+              if (!prev) {
+                return prev;
+              }
+              const lower = String(prev).toLowerCase();
+              return lower.includes("token") ? null : prev;
+            });
+          }
+        }
         cleanOptimistic();
         setMessages((prev) => {
           const next = [...prev];
@@ -2204,13 +3069,10 @@ export default function ChatPanel({
           }
           return next;
         });
-
         handleAssistantFinal(normalizedAssistant);
-
         if (data?.assistant_error) {
           setSendError(data.assistant_error);
         }
-
         return {
           success: true,
           trimmed,
@@ -2237,13 +3099,12 @@ export default function ChatPanel({
       selectedVoiceOption,
       handleUnauthorizedResponse,
       handleAssistantFinal,
+      insufficientTokens,
     ],
   );
-
   useEffect(() => {
     loadMessagesRef.current = loadMessages;
   }, [loadMessages]);
-
   const handleSend = useCallback(
     async (event) => {
       event?.preventDefault?.();
@@ -2259,21 +3120,41 @@ export default function ChatPanel({
     },
     [inputValue, sendChatMessage],
   );
-
-  const handleVoiceToggle = useCallback(() => {
+  const handleVoiceToggle = useCallback(async () => {
     if (isListeningRef.current) {
       stopRecognition();
       if (isPhoneMode) {
         setMicrophoneActive(false);
       }
-    } else {
-      const started = startRecognition();
-      if (started && isPhoneMode) {
-        setMicrophoneActive(true);
-      }
+      return;
     }
-  }, [isPhoneMode, startRecognition, stopRecognition]);
-
+    const access = await ensureMicrophoneAccess();
+    if (!access.granted) {
+      if (isPhoneMode) {
+        setPhoneCallError(
+          access.reason === "unsupported"
+            ? MICROPHONE_UNSUPPORTED_ERROR
+            : MICROPHONE_PERMISSION_ERROR,
+        );
+      }
+      return;
+    }
+    const started = startRecognition();
+    if (started) {
+      if (isPhoneMode) {
+        setMicrophoneActive(true);
+        setPhoneCallError(null);
+      }
+    } else if (isPhoneMode) {
+      setPhoneCallError(MICROPHONE_PERMISSION_ERROR);
+    }
+  }, [
+    ensureMicrophoneAccess,
+    isPhoneMode,
+    setPhoneCallError,
+    startRecognition,
+    stopRecognition,
+  ]);
   const handleReplaySpeech = useCallback(
     (message) => {
       setSpeechError(null);
@@ -2281,18 +3162,19 @@ export default function ChatPanel({
         enqueue: true,
         force: true,
         markPlayed: false,
+        interrupt: true,
       });
     },
     [registerSpeech],
   );
-
   const handleVoiceTranscript = useCallback(
     async (transcript) => {
       if (!isPhoneMode) {
         return;
       }
       const trimmed = typeof transcript === "string" ? transcript.trim() : "";
-      if (!trimmed) {
+      if (speechPreparingRef.current) {
+        setPhoneCallError("语音加载中，请稍候再说话。");
         return;
       }
       setLastHeardText(trimmed);
@@ -2305,19 +3187,16 @@ export default function ChatPanel({
     },
     [isPhoneMode, sendChatMessage],
   );
-
   useEffect(() => {
     handleVoiceTranscriptRef.current = handleVoiceTranscript;
     return () => {
       handleVoiceTranscriptRef.current = null;
     };
   }, [handleVoiceTranscript]);
-
   useEffect(() => {
     phoneVoiceLoopRef.current =
       isPhoneMode && phoneCallActive && microphoneActive;
   }, [isPhoneMode, phoneCallActive, microphoneActive]);
-
   useEffect(() => {
     if (!isPhoneMode) {
       setPhoneCallActive(false);
@@ -2330,13 +3209,11 @@ export default function ChatPanel({
       return;
     }
   }, [isPhoneMode]);
-
   useEffect(() => {
     if (!phoneCallActive) {
       setLastHeardText("");
     }
   }, [phoneCallActive]);
-
   useEffect(() => {
     if (!isPhoneMode) {
       return;
@@ -2355,7 +3232,6 @@ export default function ChatPanel({
     startRecognition,
     stopRecognition,
   ]);
-
   useEffect(() => {
     if (!isPhoneMode || !phoneCallActive || !callStartedAt) {
       if (!phoneCallActive) {
@@ -2372,13 +3248,22 @@ export default function ChatPanel({
     const timer = window.setInterval(tick, 1000);
     return () => window.clearInterval(timer);
   }, [isPhoneMode, phoneCallActive, callStartedAt]);
-
-  const startPhoneCall = useCallback(() => {
+  const startPhoneCall = useCallback(async () => {
     if (!isPhoneMode || phoneCallActive) {
       return;
     }
     if (!voiceSupported) {
-      setPhoneCallError("无法启动语音识别，请检查麦克风权限");
+      setPhoneCallError(MICROPHONE_UNSUPPORTED_ERROR);
+      return;
+    }
+    const access = await ensureMicrophoneAccess();
+    if (!access.granted) {
+      setPhoneCallError(
+        access.reason === "unsupported"
+          ? MICROPHONE_UNSUPPORTED_ERROR
+          : MICROPHONE_PERMISSION_ERROR,
+      );
+      setMicrophoneActive(false);
       return;
     }
     setPhoneCallError(null);
@@ -2389,13 +3274,18 @@ export default function ChatPanel({
     phoneVoiceLoopRef.current = true;
     const started = startRecognition();
     if (!started) {
-      setPhoneCallError("无法启动语音识别，请检查麦克风权限");
+      setPhoneCallError(MICROPHONE_PERMISSION_ERROR);
       setPhoneCallActive(false);
       phoneVoiceLoopRef.current = false;
       setCallStartedAt(null);
     }
-  }, [isPhoneMode, phoneCallActive, voiceSupported, startRecognition]);
-
+  }, [
+    ensureMicrophoneAccess,
+    isPhoneMode,
+    phoneCallActive,
+    startRecognition,
+    voiceSupported,
+  ]);
   const stopPhoneCall = useCallback(() => {
     if (!phoneCallActive) {
       return;
@@ -2410,7 +3300,6 @@ export default function ChatPanel({
     stopRecognition();
     stopSpeechPlayback();
   }, [phoneCallActive, stopRecognition, stopSpeechPlayback]);
-
   const orderedMessages = useMemo(() => {
     return [...messages].sort((a, b) => {
       const aTime = new Date(a?.created_at ?? 0).getTime();
@@ -2418,14 +3307,11 @@ export default function ChatPanel({
       return aTime - bTime;
     });
   }, [messages]);
-
   const emptyState =
     !messagesStatus.loading &&
     !conversationStatus.loading &&
     orderedMessages.length === 0;
-
   const live2DReady = live2DStatus === "ready";
-
   const speedRange = selectedVoiceOption?.settings?.speed_range ?? [0.5, 1.6];
   const pitchRange = selectedVoiceOption?.settings?.pitch_range ?? [0.7, 1.4];
   const voiceSupportsEmotion = Boolean(
@@ -2434,7 +3320,6 @@ export default function ChatPanel({
   const availableEmotions = Array.isArray(selectedVoiceOption?.emotions)
     ? selectedVoiceOption.emotions
     : [];
-
   return (
     <section className="flex h-full w-full max-h-[85vh] sm:min-h-[480px] lg:max-h-[720px] flex-col overflow-hidden rounded-3xl border border-white/30 bg-white/70 shadow-xl backdrop-blur">
       <header className="flex items-start justify-between gap-3 border-b border-white/40 bg-white/80 p-4">
@@ -2456,7 +3341,6 @@ export default function ChatPanel({
                 ? `语音模式${agent?.name ? ` - ${agent.name}` : ""}`
                 : `${agent?.name ? `  ${agent.name}` : ""}`}
             </h2>
-            
             {/* <p className="text-xs text-gray-500">
               {isPhoneMode
                 ? "通过语音实时与智能体通话，Live2D 会同步表现情绪。"
@@ -2510,6 +3394,21 @@ export default function ChatPanel({
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-gray-500">
+          <span
+            className={`rounded-full px-3 py-1 text-xs font-medium ${
+              insufficientTokens
+                ? "bg-red-100 text-red-600"
+                : "bg-slate-100 text-slate-600"
+            }`}
+          >
+            Token余额：{formattedTokenBalance ?? "加载中"}
+          </span>
+          <Link
+            href="/me/tokens"
+            className="rounded-full border border-amber-200 px-4 py-2 text-xs font-medium text-amber-600 transition hover:border-amber-300 hover:text-amber-500"
+          >
+            购买Token
+          </Link>
           {!isPhoneMode ? (
             <Link
               href={`/smart/${agentId ?? ""}/phone`}
@@ -2535,42 +3434,17 @@ export default function ChatPanel({
         <div className="border-t border-white/40 bg-white/80">
           <div className="space-y-3 px-4 pb-4">
             <div className="flex flex-wrap items-center gap-4">
-              <label className="flex items-center gap-2">
+              <div className="flex items-center gap-2">
                 <span className="text-gray-500">音色</span>
-                <select
-                  className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs focus:border-blue-400 focus:outline-none"
-                  value={selectedVoice || ""}
-                  onChange={(event) => {
-                    const nextVoice = event.target.value;
-                    userSelectedVoiceRef.current = true;
-                    setSelectedVoice(nextVoice);
-                    setSpeechError(null);
-                  }}
-                  disabled={voiceStatus.loading || voiceOptions.length === 0}
-                >
-                  {voiceOptions.length === 0 ? (
-                    <option value="">暂无可用音色</option>
-                  ) : (
-                    voiceOptions.map((option) => {
-                      const value = option?.id;
-                      if (value == null) {
-                        return null;
-                      }
-                      const label =
-                        option?.display_name ??
-                        option?.displayName ??
-                        option?.name ??
-                        option?.nickname ??
-                        String(value);
-                      return (
-                        <option key={String(value)} value={String(value)}>
-                          {label}
-                        </option>
-                      );
-                    })
-                  )}
-                </select>
-              </label>
+                <span className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-700">
+                  {selectedVoiceLabel}
+                </span>
+              </div>
+              {voiceOptions.length === 0 && !voiceStatus.loading ? (
+                <span className="text-xs text-gray-400">
+                  暂无可用音色，将使用系统默认
+                </span>
+              ) : null}
               <label className="flex items-center gap-2">
                 <span className="text-gray-500">情绪</span>
                 <select
@@ -2589,7 +3463,6 @@ export default function ChatPanel({
                   ))}
                 </select>
               </label>
-
               <label className="flex items-center gap-2">
                 <span className="text-gray-500">自动播报</span>
                 <input
@@ -2600,7 +3473,6 @@ export default function ChatPanel({
                 />
               </label>
             </div>
-
             <div className="flex flex-wrap gap-4">
               <label className="flex items-center gap-3">
                 <span className="text-gray-500">语速</span>
@@ -2625,7 +3497,6 @@ export default function ChatPanel({
                   {speechSpeed.toFixed(2)}x
                 </span>
               </label>
-
               <label className="flex items-center gap-3">
                 <span className="text-gray-500">音调</span>
                 <input
@@ -2650,7 +3521,6 @@ export default function ChatPanel({
                 </span>
               </label>
             </div>
-
             {speechError ? (
               <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-700">
                 {speechError}
@@ -2659,7 +3529,6 @@ export default function ChatPanel({
           </div>
         </div>
       ) : null}
-
       <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
           {profileStatus.error && (
@@ -2667,43 +3536,36 @@ export default function ChatPanel({
               {profileStatus.error}
             </div>
           )}
-
           {conversationStatus.error && (
             <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
               {conversationStatus.error}
             </div>
           )}
-
           {messagesStatus.error && (
             <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
               {messagesStatus.error}
             </div>
           )}
-
           {sendError && (
             <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
               {sendError}
             </div>
           )}
-
           {clearStatus.error && (
             <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
               {clearStatus.error}
             </div>
           )}
-
           {clearStatus.success && (
             <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-600">
               Chat history cleared. A fresh conversation has started.
             </div>
           )}
-
           {speechError && !voiceStatus.enabled ? (
             <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
               {speechError}
             </div>
           ) : null}
-
           {emptyState ? (
             <div className="flex h-full items-center justify-center text-sm text-gray-500">
               No messages yet. Start the conversation whenever you are ready.
@@ -2726,6 +3588,25 @@ export default function ChatPanel({
                   messageExtras?.emotion,
                 );
                 const timestamp = formatTimestamp(message?.created_at);
+                const tokenStats = formatTokenStats(message);
+                const speechStatusRaw =
+                  messageExtras?.speech_status ??
+                  messageExtras?.speechStatus ??
+                  "";
+                const normalizedSpeechStatus =
+                  typeof speechStatusRaw === "string"
+                    ? speechStatusRaw.toLowerCase()
+                    : "";
+                const speechReady = hasSpeechAudioSource(speech);
+                const shouldDelayAssistantContent =
+                  !isUser &&
+                  !speechReady &&
+                  (normalizedSpeechStatus === "pending" ||
+                    normalizedSpeechStatus === "streaming");
+                const baseContent = message?.content ?? "";
+                const displayContent = shouldDelayAssistantContent
+                  ? "加载中..."
+                  : baseContent;
                 return (
                   <li
                     key={getMessageKey(message)}
@@ -2744,70 +3625,98 @@ export default function ChatPanel({
                         </div>
                       )
                     ) : null}
-                    <div
-                      className={`flex max-w-[80%] flex-col ${isUser ? "items-end" : "items-start"}`}
-                    >
-                      <div
-                        className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
-                      >
-                        {message?.content ?? ""}
-                      </div>
-                      <span
-                        className={`mt-1 text-xs ${isUser ? "text-right" : "text-left"} text-gray-400`}
-                      >
-                        {isUser ? "You" : role}
-                        {timestamp ? ` - ${timestamp}` : ""}
-                        {message?.optimistic ? " - Sending" : ""}
-                        {message?.err_msg ? ` | ${message.err_msg}` : ""}
-                        {isSpeaking ? " • Speaking" : ""}
-                      </span>
-                      {!isUser && speech ? (
-                        <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
-                          <button
-                            onClick={() => handleReplaySpeech(message)}
-                            className="flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-500"
-                            type="button"
+                    {isUser ? (
+                      <div className="flex max-w-[80%] items-start gap-3">
+                        <div className="flex max-w-full flex-col items-end">
+                          <div
+                            className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
                           >
-                            ▶ 重播语音
-                          </button>
-                          {isSpeaking ? (
+                            {displayContent}
+                          </div>
+                          <span className="mt-1 text-xs text-right text-gray-400">
+                            {userDisplayName}
+                            {timestamp ? ` - ${timestamp}` : ""}
+                            {message?.optimistic ? " - Sending" : ""}
+                            {message?.err_msg ? ` | ${message.err_msg}` : ""}
+                            {tokenStats ? ` | ${tokenStats}` : ""}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex flex-col items-center gap-1">
+                          {userAvatar ? (
+                            <img
+                              src={userAvatar}
+                              alt={`${userDisplayName} avatar`}
+                              className="h-8 w-8 rounded-full object-cover shadow"
+                            />
+                          ) : (
+                            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500 text-xs font-medium text-white shadow">
+                              {userInitial}
+                            </div>
+                          )}
+                          <span className="text-[11px] text-gray-500">
+                            {userDisplayName}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex max-w-[80%] flex-col items-start">
+                        <div
+                          className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm shadow ${bubbleClasses} ${isSpeaking ? "ring-2 ring-blue-400" : ""}`}
+                        >
+                          {displayContent}
+                        </div>
+                        <span className="mt-1 text-xs text-left text-gray-400">
+                          {agent?.name ?? role}
+                          {timestamp ? ` - ${timestamp}` : ""}
+                          {message?.optimistic ? " - Sending" : ""}
+                          {message?.err_msg ? ` | ${message.err_msg}` : ""}
+                          {tokenStats ? ` | ${tokenStats}` : ""}
+                          {isSpeaking ? " • Speaking" : ""}
+                        </span>
+                        {speech ? (
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
                             <button
-                              onClick={stopSpeechPlayback}
-                              className="flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-[11px] text-gray-600 transition hover-border-red-400 hover:text-red-500"
+                              onClick={() => handleReplaySpeech(message)}
+                              className="flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-500"
                               type="button"
                             >
-                              ■ 停止播放
+                              ▶ 重播语音
                             </button>
-                          ) : null}
-                          {speech?.voice_id ? (
-                            <span>音色: {speech.voice_id}</span>
-                          ) : null}
-                          {emotionMeta?.display_label || emotionMeta?.label ? (
-                            <span>
-                              情绪:{" "}
-                              {emotionMeta?.display_label ?? emotionMeta?.label}
-                              {typeof emotionMeta?.intensity === "number"
-                                ? ` (${emotionMeta.intensity.toFixed(2)})`
-                                : ""}
-                            </span>
-                          ) : null}
-                          {speech?.provider ? (
-                            <span>来源: {speech.provider}</span>
-                          ) : null}
-                        </div>
-                      ) : null}
-
-                      <div className="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-blue-500 text-xs font-medium text-white shadow">
-                        You
+                            <button
+                              onClick={stopSpeechPlayback}
+                              disabled={activeSpeechId !== message?.id}
+                              className="flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-[11px] text-gray-600 transition hover-border-red-400 hover:text-red-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+                              type="button"
+                            >
+                              ■ 停播语音
+                            </button>
+                            {speech?.voice_id ? (
+                              <span>音色: {speech.voice_id}</span>
+                            ) : null}
+                            {emotionMeta?.display_label ||
+                            emotionMeta?.label ? (
+                              <span>
+                                情绪:{" "}
+                                {emotionMeta?.display_label ??
+                                  emotionMeta?.label}
+                                {typeof emotionMeta?.intensity === "number"
+                                  ? ` (${emotionMeta.intensity.toFixed(2)})`
+                                  : ""}
+                              </span>
+                            ) : null}
+                            {speech?.provider ? (
+                              <span>来源: {speech.provider}</span>
+                            ) : null}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : null}
+                    )}
                   </li>
                 );
               })}
             </ul>
           )}
         </div>
-
         {isPhoneMode ? (
           <div className="border-t border-white/40 bg-white/80 p-4">
             <div className="flex flex-col gap-3">
@@ -2820,7 +3729,12 @@ export default function ChatPanel({
                 </button>
                 <button
                   onClick={handleVoiceToggle}
-                  disabled={!voiceSupported || !phoneCallActive || isSending}
+                  disabled={
+                    !voiceSupported ||
+                    !phoneCallActive ||
+                    isSending ||
+                    speechPreparing
+                  }
                   className="flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
                 >
                   <span>
@@ -2838,13 +3752,6 @@ export default function ChatPanel({
                   />
                 </button>
                 <button
-                  onClick={loadMessages}
-                  disabled={messagesStatus.loading}
-                  className="rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
-                >
-                  刷新记录
-                </button>
-                <button
                   onClick={handleClearConversation}
                   disabled={clearStatus.loading || !userId}
                   className="rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-red-400 hover:text-red-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -2852,6 +3759,11 @@ export default function ChatPanel({
                   {clearStatus.loading ? "清空中..." : "清空记录"}
                 </button>
               </div>
+              {speechPreparing ? (
+                <p className="text-xs text-amber-600">
+                  语音生成中，请稍候再发送消息。
+                </p>
+              ) : null}
               <div className="rounded-2xl border border-gray-200 bg-white/70 px-4 py-3 text-xs text-gray-500">
                 {phoneCallError ? (
                   <span className="text-red-500">{phoneCallError}</span>
@@ -2877,20 +3789,45 @@ export default function ChatPanel({
                 value={inputValue}
                 onChange={(event) => setInputValue(event.target.value)}
                 placeholder={
-                  userId
-                    ? "Type a question or use voice input"
-                    : "Loading user context..."
+                  !userId
+                    ? "Loading user context..."
+                    : speechPreparing
+                      ? "等待语音加载完成..."
+                      : "Type a question or use voice input"
                 }
-                disabled={!userId || isSending}
+                disabled={
+                  !userId || isSending || speechPreparing || insufficientTokens
+                }
                 rows={3}
                 className="w-full resize-none rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-gray-100"
               />
+              {insufficientTokens ? (
+                <p className="text-xs text-red-500">
+                  Token余额不足，请前往购买后继续聊天。
+                </p>
+              ) : formattedTokenBalance ? (
+                <p className="text-xs text-gray-400">
+                  当前Token余额：{formattedTokenBalance}
+                </p>
+              ) : null}
+              {speechPreparing ? (
+                <p className="text-xs text-amber-600">
+                  语音生成中，请稍候再发送消息。
+                </p>
+              ) : null}
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     onClick={handleVoiceToggle}
-                    disabled={!voiceSupported || !userId || isSending}
+                    disabled={
+                      !voiceSupported ||
+                      !userId ||
+                      isSending ||
+                      speechPreparing ||
+                      insufficientTokens
+                    }
                     className="flex items-center gap-2 rounded-full border border-gray-200 px-4 py-2 text-sm text-gray-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+                    type="button"
                   >
                     <span>
                       {voiceSupported
@@ -2922,7 +3859,13 @@ export default function ChatPanel({
                   </button>
                   <button
                     type="submit"
-                    disabled={isSending || !inputValue.trim() || !userId}
+                    disabled={
+                      isSending ||
+                      !inputValue.trim() ||
+                      !userId ||
+                      speechPreparing ||
+                      insufficientTokens
+                    }
                     className="rounded-full bg-blue-500 px-5 py-2 text-sm font-medium text-white shadow transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-blue-300"
                   >
                     {isSending ? "Sending..." : "Send"}
@@ -2939,7 +3882,9 @@ export default function ChatPanel({
               <div className="flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white p-6 shadow-2xl">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-900">用户评价</h3>
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      用户评价
+                    </h3>
                     <p className="mt-1 text-sm text-gray-500">
                       看看大家对这个智能体的真实反馈。
                     </p>
@@ -2952,7 +3897,6 @@ export default function ChatPanel({
                     <span className="block h-5 w-5 text-center">×</span>
                   </button>
                 </div>
-
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                   <AgentRatingSummary
                     average={currentRatingSummary.average_score}
@@ -2962,7 +3906,9 @@ export default function ChatPanel({
                   />
                   <button
                     onClick={handleRefreshPeerRatings}
-                    disabled={peerRatingsStatus.loading && !peerRatingsStatus.appending}
+                    disabled={
+                      peerRatingsStatus.loading && !peerRatingsStatus.appending
+                    }
                     className="rounded-full border border-gray-200 px-4 py-2 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-800 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
                   >
                     {peerRatingsStatus.loading && !peerRatingsStatus.appending
@@ -2970,16 +3916,16 @@ export default function ChatPanel({
                       : "刷新"}
                   </button>
                 </div>
-
                 {peerRatingsStatus.error ? (
                   <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-600">
                     {peerRatingsStatus.error}
                   </div>
                 ) : null}
-
                 <div className="mt-4 flex-1 overflow-y-auto pr-1">
                   {isInitialPeerRatingsLoading ? (
-                    <div className="py-10 text-center text-sm text-gray-500">加载中...</div>
+                    <div className="py-10 text-center text-sm text-gray-500">
+                      加载中...
+                    </div>
                   ) : peerRatings.length === 0 ? (
                     <div className="py-10 text-center text-sm text-gray-500">
                       暂时还没有其他用户的评价。
@@ -3055,10 +4001,10 @@ export default function ChatPanel({
                     </div>
                   )}
                 </div>
-
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                   <span className="text-xs text-gray-400">
-                    已显示 {peerRatings.length} 条 / 共 {peerRatingsPageInfo.total} 条
+                    已显示 {peerRatings.length} 条 / 共{" "}
+                    {peerRatingsPageInfo.total} 条
                   </span>
                   {hasMorePeerRatings ? (
                     <button
@@ -3098,7 +4044,6 @@ export default function ChatPanel({
                     <span className="block h-5 w-5 text-center">×</span>
                   </button>
                 </div>
-
                 <div className="mt-4 flex flex-col gap-5">
                   <AgentRatingSummary
                     average={currentRatingSummary.average_score}
@@ -3106,7 +4051,6 @@ export default function ChatPanel({
                     size="md"
                     className="w-fit"
                   />
-
                   <div className="flex flex-col items-center gap-3">
                     <div className="flex items-center justify-center gap-2">
                       {[1, 2, 3, 4, 5].map((value) => {
@@ -3138,7 +4082,6 @@ export default function ChatPanel({
                       当前选择：{ratingDraft.score} 分
                     </span>
                   </div>
-
                   <div className="flex flex-col gap-2">
                     <label
                       className="text-sm font-medium text-gray-700"
@@ -3159,13 +4102,11 @@ export default function ChatPanel({
                       {(ratingDraft.comment ?? "").length}/500
                     </span>
                   </div>
-
                   {ratingSubmitStatus.error ? (
                     <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-600">
                       {ratingSubmitStatus.error}
                     </div>
                   ) : null}
-
                   <div className="flex justify-end gap-3">
                     <button
                       onClick={handleCloseRatingModal}
@@ -3191,5 +4132,3 @@ export default function ChatPanel({
     </section>
   );
 }
-
-

@@ -252,17 +252,9 @@ export default function LoginPage() {
                   </span>
                 )}
               </button>
-              <button
-                type="button"
-                onClick={loadCaptcha}
-                disabled={captcha.loading || submitting}
-                className="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 disabled:cursor-not-allowed disabled:text-slate-300"
-              >
-                {captcha.loading ? "获取中..." : "刷新验证码"}
-              </button>
             </div>
             <p className="text-xs text-slate-500">
-              {captcha.image ? "请输入图片中的字符，无法识别可刷新" : "请点击刷新获取验证码"}
+              {captcha.image ? "无法识别可点击图片刷新验证码" : "请点击刷新获取验证码"}
             </p>
             {captchaError ? (
               <p className="text-xs text-red-500">{captchaError}</p>
