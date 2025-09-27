@@ -14,7 +14,6 @@ const ROLE_LABELS = {
   user: "\u666E\u901A\u7528\u6237",
 };
 
-
 function pickStoredToken() {
   if (typeof window === "undefined") {
     return null;
@@ -78,10 +77,36 @@ function sanitizePayload(values) {
   return payload;
 }
 
+function normalizeTokenValue(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return null;
+  }
+
+  return Math.round(numeric);
+}
+
 export default function ProfilePage() {
   const router = useRouter();
   const [profile, setProfile] = useState(null);
-  const [formValues, setFormValues] = useState({ display_name: "", nickname: "", email: "", avatar_url: "", bio: "" });
+  const [tokenBalance, setTokenBalance] = useState(null);
+  const [purchaseAmount, setPurchaseAmount] = useState(1000);
+  const [purchaseStatus, setPurchaseStatus] = useState({
+    loading: false,
+    error: "",
+    success: "",
+  });
+  const [formValues, setFormValues] = useState({
+    display_name: "",
+    nickname: "",
+    email: "",
+    avatar_url: "",
+    bio: "",
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -103,6 +128,9 @@ export default function ProfilePage() {
       if (!token) {
         setUnauthorized(true);
         setProfile(null);
+        setTokenBalance(null);
+        setPurchaseStatus({ loading: false, error: "", success: "" });
+        setPurchaseAmount(1000);
         return;
       }
 
@@ -118,6 +146,9 @@ export default function ProfilePage() {
       if (response.status === 401) {
         setUnauthorized(true);
         setProfile(null);
+        setTokenBalance(null);
+        setPurchaseStatus({ loading: false, error: "", success: "" });
+        setPurchaseAmount(1000);
         return;
       }
 
@@ -132,6 +163,14 @@ export default function ProfilePage() {
       }
 
       setProfile(user);
+
+      const balance = normalizeTokenValue(
+        user?.token_balance ?? user?.tokenBalance,
+      );
+
+      setTokenBalance(balance);
+      setPurchaseStatus({ loading: false, error: "", success: "" });
+
       setFormValues({
         display_name: user?.display_name ?? "",
         nickname: user?.nickname ?? "",
@@ -150,6 +189,8 @@ export default function ProfilePage() {
       setUnauthorized(false);
     } catch (caught) {
       setError(caught?.message ?? "加载失败");
+      setTokenBalance(null);
+      setPurchaseStatus({ loading: false, error: "", success: "" });
     } finally {
       setLoading(false);
     }
@@ -159,11 +200,14 @@ export default function ProfilePage() {
     loadProfile();
   }, [loadProfile]);
 
-  useEffect(() => () => {
-    if (avatarPreview && typeof window !== "undefined") {
-      URL.revokeObjectURL(avatarPreview);
-    }
-  }, [avatarPreview]);
+  useEffect(
+    () => () => {
+      if (avatarPreview && typeof window !== "undefined") {
+        URL.revokeObjectURL(avatarPreview);
+      }
+    },
+    [avatarPreview],
+  );
 
   const handleChange = (event) => {
     const { name, value } = event.target;
@@ -281,7 +325,10 @@ export default function ProfilePage() {
 
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
-        const message = payload?.error ?? payload?.message ?? `更新失败，${response.status}。`;
+        const message =
+          payload?.error ??
+          payload?.message ??
+          `更新失败，${response.status}。`;
         throw new Error(message);
       }
 
@@ -321,6 +368,78 @@ export default function ProfilePage() {
       setError(caught?.message ?? "更新失败");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSelectPurchaseAmount = (amount) => {
+    setPurchaseAmount(amount);
+    setPurchaseStatus((prev) =>
+      prev.loading ? prev : { loading: false, error: "", success: "" },
+    );
+  };
+
+  const handlePurchaseSubmit = async (event) => {
+    event?.preventDefault?.();
+
+    const amount = Math.round(Number(purchaseAmount));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setPurchaseStatus({
+        loading: false,
+        error: "请输入有效的购买数量",
+        success: "",
+      });
+      return;
+    }
+
+    const token = pickStoredToken();
+    if (!token) {
+      setPurchaseStatus({
+        loading: false,
+        error: "请先登录后再购买 Token",
+        success: "",
+      });
+      return;
+    }
+
+    setPurchaseStatus({ loading: true, error: "", success: "" });
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/tokens/purchase`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        cache: "no-store",
+        body: JSON.stringify({ amount }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        const message =
+          data?.error ?? data?.message ?? `购买失败（${response.status}）`;
+        setPurchaseStatus({ loading: false, error: message, success: "" });
+        return;
+      }
+
+      const balance = normalizeTokenValue(
+        data?.token_balance ?? data?.tokenBalance,
+      );
+      setTokenBalance(balance);
+
+      setPurchaseStatus({
+        loading: false,
+        error: "",
+        success: `成功增加 ${amount.toLocaleString()} Token`,
+      });
+    } catch (error) {
+      setPurchaseStatus({
+        loading: false,
+        error: error?.message ?? "购买失败，请稍后重试",
+        success: "",
+      });
     }
   };
 
@@ -375,7 +494,16 @@ export default function ProfilePage() {
     } finally {
       clearStoredTokens();
       setProfile(null);
-      setFormValues({ display_name: "", nickname: "", email: "", avatar_url: "", bio: "" });
+      setTokenBalance(null);
+      setPurchaseStatus({ loading: false, error: "", success: "" });
+      setPurchaseAmount(1000);
+      setFormValues({
+        display_name: "",
+        nickname: "",
+        email: "",
+        avatar_url: "",
+        bio: "",
+      });
       setAvatarFile(null);
       if (avatarPreview && typeof window !== "undefined") {
         URL.revokeObjectURL(avatarPreview);
@@ -406,8 +534,24 @@ export default function ProfilePage() {
   const accountUsername = profile?.username ?? "未登录";
   const accountEmail = formValues.email || profile?.email || "未填写";
 
-  const avatarAlt = primaryDisplayName ? `${primaryDisplayName}头像` : "用户头像";
-  const displayAvatar = avatarPreview || formValues.avatar_url || profile?.avatar_url || "";
+  const formattedTokenBalance = useMemo(() => {
+    if (tokenBalance === null || tokenBalance === undefined) {
+      return null;
+    }
+
+    const numeric = Number(tokenBalance);
+    if (Number.isFinite(numeric)) {
+      return numeric.toLocaleString();
+    }
+
+    return String(tokenBalance);
+  }, [tokenBalance]);
+
+  const avatarAlt = primaryDisplayName
+    ? `${primaryDisplayName}头像`
+    : "用户头像";
+  const displayAvatar =
+    avatarPreview || formValues.avatar_url || profile?.avatar_url || "";
 
   const initialLetter = useMemo(() => {
     const name = primaryDisplayName || "用户";
@@ -448,7 +592,12 @@ export default function ProfilePage() {
   }, [profile?.roles]);
 
   const isAdmin = useMemo(() => {
-    return Array.isArray(profile?.roles) && profile.roles.some((role) => typeof role === "string" && role.toLowerCase() === "admin");
+    return (
+      Array.isArray(profile?.roles) &&
+      profile.roles.some(
+        (role) => typeof role === "string" && role.toLowerCase() === "admin",
+      )
+    );
   }, [profile?.roles]);
 
   if (unauthorized) {
@@ -456,7 +605,9 @@ export default function ProfilePage() {
       <div className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-br from-slate-50 via-white to-slate-100 px-6 py-10 text-slate-700">
         <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white/80 p-8 text-center shadow-2xl backdrop-blur">
           <h1 className="text-2xl font-semibold text-slate-900">请先登录</h1>
-          <p className="mt-3 text-sm text-slate-500">登录后即可管理你的个人资料与专属智能体。</p>
+          <p className="mt-3 text-sm text-slate-500">
+            登录后即可管理你的个人资料与专属智能体。
+          </p>
           <div className="mt-6 flex flex-col gap-3">
             <Link
               href="/login"
@@ -482,7 +633,9 @@ export default function ProfilePage() {
         <header className="flex flex-col gap-4 border-b border-slate-200 pb-6 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-slate-900">个人主页</h1>
-            <p className="text-sm text-slate-500">编辑头像、昵称和介绍，展示你的个性化身份。</p>
+            <p className="text-sm text-slate-500">
+              编辑头像、昵称和介绍，展示你的个性化身份。
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
             <button
@@ -505,6 +658,94 @@ export default function ProfilePage() {
         </header>
 
         <main className="mt-6">
+          <section className="mb-6 flex flex-col gap-6 rounded-3xl border border-slate-100 bg-white/90 p-6 shadow">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">
+                  Token余额
+                </h2>
+                <p className="text-sm text-slate-500">
+                  聊天将消耗 Token，余额耗尽后需要充值才能继续。
+                </p>
+              </div>
+
+              <div
+                className={`rounded-2xl border px-4 py-2 text-right ${
+                  tokenBalance === 0
+                    ? "border-red-200 bg-red-50 text-red-600"
+                    : "border-slate-200 bg-slate-50 text-slate-700"
+                }`}
+              >
+                <span className="block text-xs text-slate-400">当前余额</span>
+                <span className="text-xl font-semibold">
+                  {formattedTokenBalance ?? "加载中"}
+                </span>
+              </div>
+            </div>
+
+            <form
+              onSubmit={handlePurchaseSubmit}
+              className="flex flex-col gap-4"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                {[1000, 5000, 10000].map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    onClick={() => handleSelectPurchaseAmount(option)}
+                    className={`rounded-full border px-4 py-2 text-sm transition ${
+                      purchaseAmount === option
+                        ? "border-amber-400 bg-amber-50 text-amber-600"
+                        : "border-slate-200 bg-white text-slate-600 hover:border-amber-300 hover:text-amber-600"
+                    }`}
+                  >
+                    +{option.toLocaleString()} Token
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <label
+                  className="text-sm font-medium text-slate-600"
+                  htmlFor="token-purchase-amount"
+                >
+                  自定义数量
+                </label>
+                <input
+                  id="token-purchase-amount"
+                  type="number"
+                  min={1}
+                  value={purchaseAmount}
+                  onChange={(event) => {
+                    setPurchaseAmount(Number(event.target.value));
+                    setPurchaseStatus((prev) =>
+                      prev.loading
+                        ? prev
+                        : { loading: false, error: "", success: "" },
+                    );
+                  }}
+                  className="w-full max-w-xs rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 shadow focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-100"
+                />
+                <button
+                  type="submit"
+                  disabled={purchaseStatus.loading}
+                  className="rounded-full bg-amber-500 px-5 py-2 text-sm font-medium text-white shadow transition hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-amber-300"
+                >
+                  {purchaseStatus.loading ? "处理中..." : "购买Token"}
+                </button>
+              </div>
+
+              {purchaseStatus.error ? (
+                <p className="text-sm text-red-500">{purchaseStatus.error}</p>
+              ) : null}
+
+              {purchaseStatus.success ? (
+                <p className="text-sm text-emerald-600">
+                  {purchaseStatus.success}
+                </p>
+              ) : null}
+            </form>
+          </section>
           <section className="flex flex-col gap-6 rounded-3xl border border-slate-100 bg-white/90 p-6 shadow">
             <div className="flex items-center gap-4">
               {displayAvatar ? (
@@ -538,7 +779,9 @@ export default function ProfilePage() {
                       </span>
                     ))
                   ) : (
-                    <span className="text-sm text-slate-500">{ROLE_LABELS.user}</span>
+                    <span className="text-sm text-slate-500">
+                      {ROLE_LABELS.user}
+                    </span>
                   )}
                 </div>
 
@@ -558,7 +801,10 @@ export default function ProfilePage() {
 
             <form className="space-y-5" onSubmit={handleSubmit}>
               <div className="grid gap-2">
-                <label htmlFor="nickname" className="text-sm font-medium text-slate-600">
+                <label
+                  htmlFor="nickname"
+                  className="text-sm font-medium text-slate-600"
+                >
                   昵称
                 </label>
                 <input
@@ -575,7 +821,10 @@ export default function ProfilePage() {
               </div>
 
               <div className="grid gap-2">
-                <label htmlFor="email" className="text-sm font-medium text-slate-600">
+                <label
+                  htmlFor="email"
+                  className="text-sm font-medium text-slate-600"
+                >
                   电子邮箱
                 </label>
                 <input
@@ -591,7 +840,10 @@ export default function ProfilePage() {
               </div>
 
               <div className="grid gap-2">
-                <label htmlFor="display_name" className="text-sm font-medium text-slate-600">
+                <label
+                  htmlFor="display_name"
+                  className="text-sm font-medium text-slate-600"
+                >
                   昵称
                 </label>
                 <input
@@ -642,16 +894,22 @@ export default function ProfilePage() {
 
                     {avatarFile ? (
                       <p className="text-xs text-slate-500">
-                        待上传：{avatarFile.name}（{Math.round(avatarFile.size / 1024)} KB）
+                        待上传：{avatarFile.name}（
+                        {Math.round(avatarFile.size / 1024)} KB）
                       </p>
                     ) : null}
-                    {avatarError ? <p className="text-xs text-red-500">{avatarError}</p> : null}
+                    {avatarError ? (
+                      <p className="text-xs text-red-500">{avatarError}</p>
+                    ) : null}
                   </div>
                 </div>
               </div>
 
               <div className="grid gap-2">
-                <label htmlFor="bio" className="text-sm font-medium text-slate-600">
+                <label
+                  htmlFor="bio"
+                  className="text-sm font-medium text-slate-600"
+                >
                   个人简介
                 </label>
                 <textarea
@@ -666,11 +924,15 @@ export default function ProfilePage() {
               </div>
 
               {error ? (
-                <p className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{error}</p>
+                <p className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                  {error}
+                </p>
               ) : null}
 
               {success ? (
-                <p className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-600">{success}</p>
+                <p className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-600">
+                  {success}
+                </p>
               ) : null}
 
               <div className="flex items-center justify-end gap-3">
@@ -686,7 +948,9 @@ export default function ProfilePage() {
           </section>
 
           {loading ? (
-            <p className="mt-6 text-center text-sm text-slate-400">正在加载个人信息...</p>
+            <p className="mt-6 text-center text-sm text-slate-400">
+              正在加载个人信息...
+            </p>
           ) : null}
         </main>
       </div>
